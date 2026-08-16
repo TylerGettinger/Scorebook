@@ -1265,9 +1265,21 @@ function LiveGameView(props) {
 }
 const miniBtn = { background: "none", border: `1px solid ${C.line}`, color: C.chalkDim, borderRadius: 4, width: 18, height: 18, cursor: "pointer", fontSize: 12, lineHeight: 1, padding: 0 };
 
+function BatIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" style={{ flexShrink: 0 }}>
+      <g transform="rotate(-40 12 12)">
+        <rect x="10.5" y="2" width="3" height="12" rx="1.5" fill={C.amber} />
+        <rect x="10" y="13" width="4" height="9" rx="2" fill={C.dirt} />
+      </g>
+    </svg>
+  );
+}
+
 /* ---------------- BIG-PRINT SCOREBOARD ---------------- */
 function ScoreHeader({ game, team }) {
   const ourName = team ? team.name : "Us";
+  const usBatting = game.isHome ? game.half === "bottom" : game.half === "top";
   return (
     <Card style={{ marginBottom: 16, background: C.navy, border: "none" }}>
       <div
@@ -1287,10 +1299,13 @@ function ScoreHeader({ game, team }) {
         {game.half === "top" ? "▲ TOP" : "▼ BOT"} {game.inning}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {[{ name: ourName, score: game.ourScore }, { name: game.opponent, score: game.theirScore }].map((row, i) => (
+        {[{ name: ourName, score: game.ourScore, batting: usBatting }, { name: game.opponent, score: game.theirScore, batting: !usBatting }].map((row, i) => (
           <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14 }}>
-            <div style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 20, fontWeight: 500, flex: 1, minWidth: 0, wordBreak: "break-word", lineHeight: 1.2 }}>
-              {row.name}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
+              {row.batting && <BatIcon />}
+              <div style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 20, fontWeight: 500, minWidth: 0, wordBreak: "break-word", lineHeight: 1.2 }}>
+                {row.name}
+              </div>
             </div>
             <div style={{ fontFamily: "IBM Plex Mono, monospace", color: C.chalk, fontSize: 40, fontWeight: 800, minWidth: 56, textAlign: "right" }}>
               {row.score}
