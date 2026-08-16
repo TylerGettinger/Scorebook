@@ -21,6 +21,10 @@ const C = {
   ink: "#26241D",
 };
 
+// A game is assumed to run this many innings when computing ERA (typical for
+// travel/high-school softball). Doesn't affect anything except that one number.
+const ERA_INNINGS = 7;
+
 const OUTCOMES = [
   { key: "1B", label: "1B", full: "Single", ab: true, hit: true, bases: 1, out: false },
   { key: "2B", label: "2B", full: "Double", ab: true, hit: true, bases: 2, out: false },
@@ -38,6 +42,19 @@ const outcomeByKey = (k) => OUTCOMES.find((o) => o.key === k);
 
 const POSITIONS = ["P", "C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "EX"];
 
+function emptyPitchingState() {
+  return {
+    ourPitcherId: null,
+    ourBalls: 0,
+    ourStrikes: 0,
+    ourOutsAtStintStart: 0,
+    ourEarnedRuns: 0,
+    ourHistory: [], // [{ playerId, balls, strikes, outsRecorded, earnedRuns }]
+    theirName: "",
+    theirBalls: 0,
+    theirStrikes: 0,
+  };
+}
 function emptyGameState() {
   return {
     lineup: [],
@@ -45,6 +62,7 @@ function emptyGameState() {
     inning: 1,
     half: "top",
     outs: 0,
+    totalPitchingOuts: 0, // cumulative outs recorded while WE are on defense (doesn't reset each half)
     bases: { 1: null, 2: null, 3: null },
     plays: [],
     scores: [],
@@ -52,12 +70,14 @@ function emptyGameState() {
     report: "",
     defense: { positions: {} }, // playerId -> position code
     fielding: {}, // playerId -> { PO, A, E }
-    pitching: { ourPitcherId: null, ourCount: 0, ourHistory: [], theirName: "", theirCount: 0 },
+    pitching: emptyPitchingState(),
   };
 }
 
 /* ---------------- row <-> app-object mapping ---------------- */
 function rowToGame(row) {
+  const base = { ...emptyGameState(), ...(row.state || {}) };
+  base.pitching = { ...emptyPitchingState(), ...(base.pitching || {}) };
   return {
     id: row.id,
     teamId: row.team_id,
@@ -67,8 +87,7 @@ function rowToGame(row) {
     status: row.status,
     ourScore: row.our_score,
     theirScore: row.their_score,
-    ...emptyGameState(),
-    ...(row.state || {}),
+    ...base,
   };
 }
 function gameToRow(g) {
@@ -118,6 +137,19 @@ function computeStatsFromPlays(playerId, plays, scores) {
 }
 const fmt3 = (n) => (n === 0 ? ".000" : n.toFixed(3).replace(/^0/, ""));
 const firstName = (full) => (full || "").trim().split(/\s+/)[0] || "";
+const ipDisplay = (outs) => `${Math.floor(outs / 3)}.${outs % 3}`;
+function pitchingLine(stints) {
+  // stints: [{balls, strikes, outsRecorded, earnedRuns}]
+  const balls = stints.reduce((a, s) => a + (s.balls || 0), 0);
+  const strikes = stints.reduce((a, s) => a + (s.strikes || 0), 0);
+  const outs = stints.reduce((a, s) => a + (s.outsRecorded || 0), 0);
+  const er = stints.reduce((a, s) => a + (s.earnedRuns || 0), 0);
+  const pitches = balls + strikes;
+  const strikePct = pitches > 0 ? (strikes / pitches) * 100 : 0;
+  const ip = outs / 3;
+  const era = ip > 0 ? (er * ERA_INNINGS) / ip : 0;
+  return { balls, strikes, outs, er, pitches, strikePct, ip, era };
+}
 
 /* ---------------- small UI atoms ---------------- */
 function Btn({ children, onClick, tone = "dirt", size = "md", disabled, style }) {
@@ -411,13 +443,17 @@ function Scorebook() {
 
   const defenseOut = () => {
     if (!activeGame) return;
-    let g = { ...activeGame, outs: activeGame.outs + 1 };
+    let g = { ...activeGame, outs: activeGame.outs + 1, totalPitchingOuts: activeGame.totalPitchingOuts + 1 };
     if (g.outs >= 3) g = flipHalf(g);
     persistGame(g);
   };
-  const theirRun = (delta) => {
+  const theirRun = (delta, earned) => {
     if (!activeGame) return;
-    persistGame({ ...activeGame, theirScore: Math.max(0, activeGame.theirScore + delta) });
+    let g = { ...activeGame, theirScore: Math.max(0, activeGame.theirScore + delta) };
+    if (delta > 0 && earned) {
+      g = { ...g, pitching: { ...g.pitching, ourEarnedRuns: g.pitching.ourEarnedRuns + delta } };
+    }
+    persistGame(g);
   };
   const skipHalf = () => activeGame && persistGame(flipHalf(activeGame));
   const undoLast = () => {
@@ -432,7 +468,7 @@ function Scorebook() {
     });
   };
 
-  /* ---------- defense: positions + fielding + pitching ---------- */
+  /* ---------- defense: positions + fielding ---------- */
   const setPosition = (playerId, pos) => {
     if (!activeGame) return;
     const positions = { ...activeGame.defense.positions };
@@ -445,33 +481,45 @@ function Scorebook() {
     const next = { ...current, [stat]: Math.max(0, current[stat] + delta) };
     persistGame({ ...activeGame, fielding: { ...activeGame.fielding, [playerId]: next } });
   };
+
+  /* ---------- pitching: balls / strikes / pitcher changes ---------- */
+  const archiveCurrentStint = (g) => {
+    const p = g.pitching;
+    if (!p.ourPitcherId) return p;
+    const outsRecorded = g.totalPitchingOuts - p.ourOutsAtStintStart;
+    if (outsRecorded === 0 && p.ourBalls === 0 && p.ourStrikes === 0 && p.ourEarnedRuns === 0) return p; // nothing to archive
+    return {
+      ...p,
+      ourHistory: [...p.ourHistory, { playerId: p.ourPitcherId, balls: p.ourBalls, strikes: p.ourStrikes, outsRecorded, earnedRuns: p.ourEarnedRuns }],
+    };
+  };
   const setOurPitcher = (playerId) => {
     if (!activeGame) return;
-    const prev = activeGame.pitching;
-    const history = prev.ourPitcherId && prev.ourCount > 0 ? [...prev.ourHistory, { playerId: prev.ourPitcherId, pitches: prev.ourCount }] : prev.ourHistory;
-    persistGame({ ...activeGame, pitching: { ...prev, ourPitcherId: playerId, ourCount: 0, ourHistory: history } });
+    const archived = archiveCurrentStint(activeGame);
+    persistGame({
+      ...activeGame,
+      pitching: { ...archived, ourPitcherId: playerId, ourBalls: 0, ourStrikes: 0, ourEarnedRuns: 0, ourOutsAtStintStart: activeGame.totalPitchingOuts },
+    });
   };
-  const bumpOurPitchCount = (delta) => {
-    if (!activeGame) return;
-    const prev = activeGame.pitching;
-    persistGame({ ...activeGame, pitching: { ...prev, ourCount: Math.max(0, prev.ourCount + delta) } });
+  const bumpOurPitch = (type, delta) => {
+    if (!activeGame || !activeGame.pitching.ourPitcherId) return;
+    const key = type === "ball" ? "ourBalls" : "ourStrikes";
+    persistGame({ ...activeGame, pitching: { ...activeGame.pitching, [key]: Math.max(0, activeGame.pitching[key] + delta) } });
   };
   const setTheirPitcherName = (name) => {
     if (!activeGame) return;
     persistGame({ ...activeGame, pitching: { ...activeGame.pitching, theirName: name } });
   };
-  const bumpTheirPitchCount = (delta) => {
+  const bumpTheirPitch = (type, delta) => {
     if (!activeGame) return;
-    const prev = activeGame.pitching;
-    persistGame({ ...activeGame, pitching: { ...prev, theirCount: Math.max(0, prev.theirCount + delta) } });
+    const key = type === "ball" ? "theirBalls" : "theirStrikes";
+    persistGame({ ...activeGame, pitching: { ...activeGame.pitching, [key]: Math.max(0, activeGame.pitching[key] + delta) } });
   };
 
   const endGame = () => {
     if (!activeGame) return;
-    const prev = activeGame.pitching;
-    const history = prev.ourPitcherId && prev.ourCount > 0 ? [...prev.ourHistory, { playerId: prev.ourPitcherId, pitches: prev.ourCount }] : prev.ourHistory;
-    const g = { ...activeGame, status: "final", pitching: { ...prev, ourHistory: history } };
-    persistGame(g);
+    const archived = archiveCurrentStint(activeGame);
+    persistGame({ ...activeGame, status: "final", pitching: archived });
     setView("summary");
   };
   const reopenGame = () => {
@@ -596,9 +644,9 @@ function Scorebook() {
             setPosition={setPosition}
             bumpFielding={bumpFielding}
             setOurPitcher={setOurPitcher}
-            bumpOurPitchCount={bumpOurPitchCount}
+            bumpOurPitch={bumpOurPitch}
             setTheirPitcherName={setTheirPitcherName}
-            bumpTheirPitchCount={bumpTheirPitchCount}
+            bumpTheirPitch={bumpTheirPitch}
             goHome={() => setView("home")}
           />
         )}
@@ -891,12 +939,85 @@ function BattingPreview({ lineup, players, currentBatterIndex }) {
   );
 }
 
+/* ---------------- BALL-STRIKE COUNTER (shared by offense/defense) ---------------- */
+function PitchCounter({ title, pitcherControl, balls, strikes, onBall, onStrike, disabled }) {
+  const pitches = balls + strikes;
+  const pct = pitches > 0 ? Math.round((strikes / pitches) * 100) : 0;
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <Eyebrow>{title}</Eyebrow>
+      {pitcherControl && <div style={{ marginBottom: 10 }}>{pitcherControl}</div>}
+      <div style={{ display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>BALLS</div>
+          <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 26, color: C.chalk, fontWeight: 700 }}>{balls}</div>
+          <Btn size="sm" onClick={onBall} disabled={disabled}>+1 Ball</Btn>
+        </div>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>STRIKES</div>
+          <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 26, color: C.chalk, fontWeight: 700 }}>{strikes}</div>
+          <Btn size="sm" tone="amber" onClick={onStrike} disabled={disabled}>+1 Strike</Btn>
+        </div>
+        <div style={{ textAlign: "center", marginLeft: "auto" }}>
+          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>PITCHES / STRIKE%</div>
+          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 18, color: C.amber, fontWeight: 700 }}>{pitches} · {pct}%</div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+/* ---------------- LIVE / FINAL BOX SCORE (shared) ---------------- */
+function BoxScoreTable({ lineup, players, plays, scores }) {
+  const rows = lineup.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: computeStatsFromPlays(p.id, plays, scores) }));
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 13 }}>
+        <thead><tr style={{ color: C.amber, textAlign: "left" }}>{["Player", "AB", "R", "H", "RBI", "BB", "K", "AVG"].map((h) => <th key={h} style={{ padding: "4px 8px", borderBottom: `1px solid ${C.line}55` }}>{h}</th>)}</tr></thead>
+        <tbody>{rows.map(({ p, s }) => (
+          <tr key={p.id} style={{ color: C.chalk }}>
+            <td style={{ padding: "4px 8px" }}>{p.name}</td><td style={{ padding: "4px 8px" }}>{s.AB}</td><td style={{ padding: "4px 8px" }}>{s.R}</td>
+            <td style={{ padding: "4px 8px" }}>{s.H}</td><td style={{ padding: "4px 8px" }}>{s.RBI}</td><td style={{ padding: "4px 8px" }}>{s.BB}</td>
+            <td style={{ padding: "4px 8px" }}>{s.K}</td><td style={{ padding: "4px 8px" }}>{fmt3(s.AVG)}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+function PitchingLineDisplay({ game, players }) {
+  const p = game.pitching;
+  const stints = [...p.ourHistory];
+  if (p.ourPitcherId) stints.push({ playerId: p.ourPitcherId, balls: p.ourBalls, strikes: p.ourStrikes, outsRecorded: game.totalPitchingOuts - p.ourOutsAtStintStart, earnedRuns: p.ourEarnedRuns });
+  const byPlayer = {};
+  stints.forEach((s) => {
+    byPlayer[s.playerId] = byPlayer[s.playerId] || [];
+    byPlayer[s.playerId].push(s);
+  });
+  const names = Object.keys(byPlayer);
+  if (names.length === 0) return null;
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1, marginBottom: 4 }}>PITCHING</div>
+      {names.map((pid) => {
+        const player = players.find((x) => x.id === pid);
+        const line = pitchingLine(byPlayer[pid]);
+        return (
+          <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>
+            {player ? player.name : "?"} — {ipDisplay(line.outs)} IP, {line.er} ER, ERA {line.era.toFixed(2)}, {line.strikePct.toFixed(0)}% strikes ({line.strikes}/{line.pitches})
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /* ---------------- LIVE GAME ---------------- */
 function LiveGameView(props) {
   const {
     game, team, players, usBatting, scorekeeper, selectedBase,
     recordOutcome, tapBase, runnerAction, defenseOut, theirRun, skipHalf, undoLast, endGame,
-    setPosition, bumpFielding, setOurPitcher, bumpOurPitchCount, setTheirPitcherName, bumpTheirPitchCount,
+    setPosition, bumpFielding, setOurPitcher, bumpOurPitch, setTheirPitcherName, bumpTheirPitch,
     goHome,
   } = props;
   const batter = players.find((p) => p.id === game.lineup[game.currentBatterIndex % game.lineup.length]);
@@ -934,6 +1055,7 @@ function LiveGameView(props) {
               </Card>
             )}
           </div>
+
           {scorekeeper && [1, 2, 3].some((n) => game.bases[n]) && (
             <div style={{ marginTop: -8, marginBottom: 16 }}>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -976,20 +1098,21 @@ function LiveGameView(props) {
           )}
 
           {scorekeeper && usBatting && (
-            <Card style={{ marginBottom: 16 }}>
-              <Eyebrow>Their pitcher (pitch count)</Eyebrow>
-              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <PitchCounter
+              title={`Their pitcher${game.pitching.theirName ? " — " + game.pitching.theirName : ""}`}
+              pitcherControl={
                 <input
                   value={game.pitching.theirName}
                   onChange={(e) => setTheirPitcherName(e.target.value)}
                   placeholder="Pitcher name / number"
-                  style={{ flex: "1 1 160px", padding: "8px 10px", borderRadius: 8, border: `1px solid ${C.line}`, background: C.chalk, color: C.ink, fontSize: 13 }}
+                  style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: `1px solid ${C.line}`, background: C.chalk, color: C.ink, fontSize: 13 }}
                 />
-                <span style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, fontSize: 20, fontWeight: 700, minWidth: 30, textAlign: "center" }}>{game.pitching.theirCount}</span>
-                <Btn size="sm" onClick={() => bumpTheirPitchCount(1)}>+1 Pitch</Btn>
-                <Btn size="sm" tone="ghost" onClick={() => bumpTheirPitchCount(-1)}>-1</Btn>
-              </div>
-            </Card>
+              }
+              balls={game.pitching.theirBalls}
+              strikes={game.pitching.theirStrikes}
+              onBall={() => bumpTheirPitch("ball", 1)}
+              onStrike={() => bumpTheirPitch("strike", 1)}
+            />
           )}
 
           {scorekeeper && !usBatting && (
@@ -998,25 +1121,30 @@ function LiveGameView(props) {
                 <Eyebrow>On defense — {game.opponent} batting</Eyebrow>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                   <Btn onClick={defenseOut} style={{ background: C.navy }}>Record Out</Btn>
-                  <Btn tone="amber" onClick={() => theirRun(1)}>+1 Run ({game.opponent})</Btn>
-                  <Btn tone="ghost" size="sm" onClick={() => theirRun(-1)}>-1 Run</Btn>
+                  <Btn tone="amber" onClick={() => theirRun(1, true)}>+1 Run (Earned)</Btn>
+                  <Btn tone="dirt" onClick={() => theirRun(1, false)}>+1 Run (Unearned)</Btn>
+                  <Btn tone="ghost" size="sm" onClick={() => theirRun(-1, false)}>-1 Run</Btn>
                   <Btn tone="ghost" size="sm" onClick={skipHalf}>Skip to Next Half-Inning</Btn>
                 </div>
               </Card>
 
-              <Card style={{ marginBottom: 16 }}>
-                <Eyebrow>Our pitcher</Eyebrow>
-                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
-                  <select value={game.pitching.ourPitcherId || ""} onChange={(e) => setOurPitcher(e.target.value || null)} style={{ ...selStyle, width: "auto", flex: "1 1 160px" }}>
-                    <option value="">Select pitcher…</option>
-                    {defensivePlayers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                  </select>
-                  <span style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, fontSize: 20, fontWeight: 700, minWidth: 30, textAlign: "center" }}>{game.pitching.ourCount}</span>
-                  <Btn size="sm" onClick={() => bumpOurPitchCount(1)} disabled={!game.pitching.ourPitcherId}>+1 Pitch</Btn>
-                  <Btn size="sm" tone="ghost" onClick={() => bumpOurPitchCount(-1)} disabled={!game.pitching.ourPitcherId}>-1</Btn>
-                </div>
-                {ourPitcher && <div style={{ fontSize: 12, color: C.chalkDim, fontFamily: "IBM Plex Mono, monospace" }}>Now pitching: {ourPitcher.name}</div>}
-              </Card>
+              <PitchCounter
+                title="Our pitcher"
+                pitcherControl={
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <select value={game.pitching.ourPitcherId || ""} onChange={(e) => setOurPitcher(e.target.value || null)} style={{ ...selStyle, width: "auto", flex: "1 1 160px" }}>
+                      <option value="">Select pitcher…</option>
+                      {defensivePlayers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                    {ourPitcher && <span style={{ fontSize: 12, color: C.chalkDim, fontFamily: "IBM Plex Mono, monospace" }}>Now pitching: {ourPitcher.name}</span>}
+                  </div>
+                }
+                balls={game.pitching.ourBalls}
+                strikes={game.pitching.ourStrikes}
+                onBall={() => bumpOurPitch("ball", 1)}
+                onStrike={() => bumpOurPitch("strike", 1)}
+                disabled={!game.pitching.ourPitcherId}
+              />
 
               <Card style={{ marginBottom: 16 }}>
                 <Eyebrow>Defensive positions & fielding</Eyebrow>
@@ -1045,6 +1173,12 @@ function LiveGameView(props) {
             </>
           )}
 
+          <Eyebrow>Live box score — {team ? team.name : "Us"}</Eyebrow>
+          <Card style={{ marginBottom: 16 }}>
+            <BoxScoreTable lineup={game.lineup} players={players} plays={game.plays} scores={game.scores} />
+            <PitchingLineDisplay game={game} players={players} />
+          </Card>
+
           {scorekeeper && <Btn tone="red" size="lg" onClick={endGame}>End Game & Build Recap</Btn>}
         </div>
 
@@ -1070,18 +1204,38 @@ function LiveGameView(props) {
 }
 const miniBtn = { background: "none", border: `1px solid ${C.line}`, color: C.chalkDim, borderRadius: 4, width: 18, height: 18, cursor: "pointer", fontSize: 12, lineHeight: 1, padding: 0 };
 
+/* ---------------- BIG-PRINT SCOREBOARD ---------------- */
 function ScoreHeader({ game, team }) {
+  const ourName = team ? team.name : "Us";
   return (
     <Card style={{ marginBottom: 16, background: C.navy, border: "none" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
-        <div>
-          <div style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, fontSize: 12, letterSpacing: 1 }}>{game.half === "top" ? "TOP" : "BOT"} {game.inning}</div>
-          <div style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 18 }}>{team ? team.name : "Us"} vs {game.opponent}</div>
-        </div>
-        <div style={{ display: "flex", gap: 20, fontFamily: "IBM Plex Mono, monospace" }}>
-          <div style={{ textAlign: "center" }}><div style={{ color: C.chalkDim, fontSize: 11 }}>{team ? team.name.slice(0, 10) : "US"}</div><div style={{ color: C.chalk, fontSize: 30, fontWeight: 700 }}>{game.ourScore}</div></div>
-          <div style={{ textAlign: "center" }}><div style={{ color: C.chalkDim, fontSize: 11 }}>{game.opponent.slice(0, 10)}</div><div style={{ color: C.chalk, fontSize: 30, fontWeight: 700 }}>{game.theirScore}</div></div>
-        </div>
+      <div
+        style={{
+          display: "inline-block",
+          background: C.amber,
+          color: C.ink,
+          borderRadius: 8,
+          padding: "6px 16px",
+          fontFamily: "Oswald, sans-serif",
+          fontWeight: 700,
+          fontSize: 26,
+          letterSpacing: 1,
+          marginBottom: 14,
+        }}
+      >
+        {game.half === "top" ? "▲ TOP" : "▼ BOT"} {game.inning}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {[{ name: ourName, score: game.ourScore }, { name: game.opponent, score: game.theirScore }].map((row, i) => (
+          <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14 }}>
+            <div style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 20, fontWeight: 500, flex: 1, minWidth: 0, wordBreak: "break-word", lineHeight: 1.2 }}>
+              {row.name}
+            </div>
+            <div style={{ fontFamily: "IBM Plex Mono, monospace", color: C.chalk, fontSize: 40, fontWeight: 800, minWidth: 56, textAlign: "right" }}>
+              {row.score}
+            </div>
+          </div>
+        ))}
       </div>
     </Card>
   );
@@ -1089,17 +1243,13 @@ function ScoreHeader({ game, team }) {
 
 /* ---------------- SUMMARY ---------------- */
 function SummaryView({ game, team, players, scorekeeper, generating, generateRecap, updateReport, updateGameMeta, reopenGame, deleteGame, goHome }) {
-  const rows = game.lineup.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: computeStatsFromPlays(p.id, game.plays, game.scores) }));
   const [editing, setEditing] = useState(false);
   const [opponent, setOpponent] = useState(game.opponent);
   const [date, setDate] = useState(game.date);
   const [ourScore, setOurScore] = useState(game.ourScore);
   const [theirScore, setTheirScore] = useState(game.theirScore);
 
-  const pitchers = [
-    ...game.pitching.ourHistory,
-    ...(game.pitching.ourPitcherId ? [{ playerId: game.pitching.ourPitcherId, pitches: game.pitching.ourCount }] : []),
-  ];
+  const rows = game.lineup.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: computeStatsFromPlays(p.id, game.plays, game.scores) }));
 
   const emailHref = () => {
     const subject = encodeURIComponent(`${team ? team.name : "Game"} vs ${game.opponent} — ${game.date}`);
@@ -1137,34 +1287,23 @@ function SummaryView({ game, team, players, scorekeeper, generating, generateRec
       )}
 
       <Eyebrow>Final Box Score</Eyebrow>
-      <Card style={{ marginBottom: 16, overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 13 }}>
-          <thead><tr style={{ color: C.amber, textAlign: "left" }}>{["Player", "AB", "R", "H", "RBI", "BB", "K", "AVG"].map((h) => <th key={h} style={{ padding: "4px 8px", borderBottom: `1px solid ${C.line}55` }}>{h}</th>)}</tr></thead>
-          <tbody>{rows.map(({ p, s }) => (
-            <tr key={p.id} style={{ color: C.chalk }}>
-              <td style={{ padding: "4px 8px" }}>{p.name}</td><td style={{ padding: "4px 8px" }}>{s.AB}</td><td style={{ padding: "4px 8px" }}>{s.R}</td>
-              <td style={{ padding: "4px 8px" }}>{s.H}</td><td style={{ padding: "4px 8px" }}>{s.RBI}</td><td style={{ padding: "4px 8px" }}>{s.BB}</td>
-              <td style={{ padding: "4px 8px" }}>{s.K}</td><td style={{ padding: "4px 8px" }}>{fmt3(s.AVG)}</td>
-            </tr>
-          ))}</tbody>
-        </table>
+      <Card style={{ marginBottom: 16 }}>
+        <BoxScoreTable lineup={game.lineup} players={players} plays={game.plays} scores={game.scores} />
       </Card>
 
-      {(pitchers.length > 0 || Object.keys(game.fielding).length > 0) && (
+      {(game.pitching.ourHistory.length > 0 || game.pitching.ourPitcherId || Object.keys(game.fielding).length > 0) && (
         <>
           <Eyebrow>Pitching & Fielding</Eyebrow>
           <Card style={{ marginBottom: 16 }}>
-            {pitchers.length > 0 && (
-              <div style={{ marginBottom: 10 }}>
-                {pitchers.map((h, i) => {
-                  const p = players.find((x) => x.id === h.playerId);
-                  return <div key={i} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>{p ? p.name : "?"} — {h.pitches} pitches</div>;
-                })}
-                {game.pitching.theirName && <div style={{ color: C.chalkDim, fontSize: 13, fontFamily: "IBM Plex Mono, monospace", marginTop: 4 }}>{game.opponent} — {game.pitching.theirName}: {game.pitching.theirCount} pitches</div>}
+            <PitchingLineDisplay game={game} players={players} />
+            {game.pitching.theirName && (
+              <div style={{ color: C.chalkDim, fontSize: 13, fontFamily: "IBM Plex Mono, monospace", marginTop: 8 }}>
+                {game.opponent} — {game.pitching.theirName}: {game.pitching.theirBalls + game.pitching.theirStrikes} pitches, {game.pitching.theirStrikes} strikes
+                ({(game.pitching.theirBalls + game.pitching.theirStrikes) > 0 ? Math.round((game.pitching.theirStrikes / (game.pitching.theirBalls + game.pitching.theirStrikes)) * 100) : 0}%)
               </div>
             )}
             {Object.keys(game.fielding).length > 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 3, marginTop: 10 }}>
                 {Object.entries(game.fielding).filter(([, f]) => f.PO || f.A || f.E).map(([pid, f]) => {
                   const p = players.find((x) => x.id === pid);
                   return <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>{p ? p.name : "?"} — {f.PO} PO, {f.A} A, {f.E} E</div>;
@@ -1211,7 +1350,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
   const sortable = ["AVG", "OBP", "SLG", "H", "R", "RBI", "HR", "BB", "K"];
 
   const fieldingTotals = {};
-  const pitchTotals = {};
+  const pitchStintsByPlayer = {};
   games.forEach((g) => {
     Object.entries(g.fielding || {}).forEach(([pid, f]) => {
       fieldingTotals[pid] = fieldingTotals[pid] || { PO: 0, A: 0, E: 0 };
@@ -1220,7 +1359,8 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
       fieldingTotals[pid].E += f.E || 0;
     });
     (g.pitching?.ourHistory || []).forEach((h) => {
-      pitchTotals[h.playerId] = (pitchTotals[h.playerId] || 0) + h.pitches;
+      pitchStintsByPlayer[h.playerId] = pitchStintsByPlayer[h.playerId] || [];
+      pitchStintsByPlayer[h.playerId].push(h);
     });
   });
 
@@ -1277,26 +1417,48 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
         )}
       </Card>
 
-      {(Object.keys(fieldingTotals).length > 0 || Object.keys(pitchTotals).length > 0) && (
+      {(Object.keys(pitchStintsByPlayer).length > 0) && (
         <>
-          <Eyebrow>Season Pitching & Fielding</Eyebrow>
+          <Eyebrow>Season Pitching</Eyebrow>
+          <Card style={{ overflowX: "auto", marginBottom: 16 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 12.5, minWidth: 480 }}>
+              <thead>
+                <tr style={{ color: C.amber, textAlign: "left" }}>
+                  {["Player", "IP", "ER", "ERA", "Pitches", "Strike%"].map((h) => <th key={h} style={{ padding: "4px 6px", borderBottom: `1px solid ${C.line}55` }}>{h}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(pitchStintsByPlayer).map(([pid, stints]) => {
+                  const p = rosterPlayers.find((x) => x.id === pid);
+                  const line = pitchingLine(stints);
+                  return (
+                    <tr key={pid} style={{ color: C.chalk }}>
+                      <td style={{ padding: "4px 6px" }}>{p ? p.name : "?"}</td>
+                      <td style={{ padding: "4px 6px" }}>{ipDisplay(line.outs)}</td>
+                      <td style={{ padding: "4px 6px" }}>{line.er}</td>
+                      <td style={{ padding: "4px 6px" }}>{line.era.toFixed(2)}</td>
+                      <td style={{ padding: "4px 6px" }}>{line.pitches}</td>
+                      <td style={{ padding: "4px 6px" }}>{line.strikePct.toFixed(0)}%</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <div style={{ fontSize: 11, color: C.chalkDim, marginTop: 8 }}>ERA is normalized to a {ERA_INNINGS}-inning game.</div>
+          </Card>
+        </>
+      )}
+
+      {Object.keys(fieldingTotals).length > 0 && (
+        <>
+          <Eyebrow>Season Fielding</Eyebrow>
           <Card style={{ overflowX: "auto" }}>
-            {Object.keys(pitchTotals).length > 0 && (
-              <div style={{ marginBottom: 10 }}>
-                {Object.entries(pitchTotals).map(([pid, total]) => {
-                  const p = rosterPlayers.find((x) => x.id === pid);
-                  return <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>{p ? p.name : "?"} — {total} pitches thrown</div>;
-                })}
-              </div>
-            )}
-            {Object.keys(fieldingTotals).length > 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                {Object.entries(fieldingTotals).map(([pid, f]) => {
-                  const p = rosterPlayers.find((x) => x.id === pid);
-                  return <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>{p ? p.name : "?"} — {f.PO} PO, {f.A} A, {f.E} E</div>;
-                })}
-              </div>
-            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+              {Object.entries(fieldingTotals).map(([pid, f]) => {
+                const p = rosterPlayers.find((x) => x.id === pid);
+                return <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>{p ? p.name : "?"} — {f.PO} PO, {f.A} A, {f.E} E</div>;
+              })}
+            </div>
           </Card>
         </>
       )}
