@@ -11,6 +11,7 @@ const C = {
   greenDeep: "#142B21",
   greenLight: "#2F5744",
   dirt: "#A9682C",
+  dirtLight: "#C98B4A",
   chalk: "#F5F3EC",
   chalkDim: "#E7E2D4",
   amber: "#E8A33D",
@@ -35,6 +36,8 @@ const OUTCOMES = [
 ];
 const outcomeByKey = (k) => OUTCOMES.find((o) => o.key === k);
 
+const POSITIONS = ["P", "C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "EX"];
+
 function emptyGameState() {
   return {
     lineup: [],
@@ -47,6 +50,9 @@ function emptyGameState() {
     scores: [],
     currentPlayId: null,
     report: "",
+    defense: { positions: {} }, // playerId -> position code
+    fielding: {}, // playerId -> { PO, A, E }
+    pitching: { ourPitcherId: null, ourCount: 0, ourHistory: [], theirName: "", theirCount: 0 },
   };
 }
 
@@ -111,6 +117,7 @@ function computeStatsFromPlays(playerId, plays, scores) {
   return s;
 }
 const fmt3 = (n) => (n === 0 ? ".000" : n.toFixed(3).replace(/^0/, ""));
+const firstName = (full) => (full || "").trim().split(/\s+/)[0] || "";
 
 /* ---------------- small UI atoms ---------------- */
 function Btn({ children, onClick, tone = "dirt", size = "md", disabled, style }) {
@@ -161,27 +168,34 @@ function Eyebrow({ children }) {
     </div>
   );
 }
-function Diamond({ bases, onTapBase }) {
+function Diamond({ bases, names }) {
   const pos = { home: [100, 160], 1: [165, 100], 2: [100, 40], 3: [35, 100] };
+  const labelPos = { 1: [pos[1][0] + 14, pos[1][1] + 4], 2: [pos[2][0], pos[2][1] - 16], 3: [pos[3][0] - 14, pos[3][1] + 4] };
+  const labelAnchor = { 1: "start", 2: "middle", 3: "end" };
   const baseFill = (n) => (bases[n] ? C.amber : "transparent");
   const baseStroke = (n) => (bases[n] ? C.amber : C.chalk);
   return (
-    <svg viewBox="0 0 200 180" style={{ width: 150, height: 135 }}>
+    <svg viewBox="0 0 200 190" style={{ width: 170, height: 160 }}>
       <polygon points={`${pos.home.join(",")} ${pos[1].join(",")} ${pos[2].join(",")} ${pos[3].join(",")}`} fill="none" stroke={C.chalkDim} strokeWidth="2" opacity="0.5" />
       {[1, 2, 3].map((n) => (
-        <rect
-          key={n}
-          x={pos[n][0] - 10}
-          y={pos[n][1] - 10}
-          width="20"
-          height="20"
-          transform={`rotate(45 ${pos[n][0]} ${pos[n][1]})`}
-          fill={baseFill(n)}
-          stroke={baseStroke(n)}
-          strokeWidth="2.5"
-          style={{ cursor: bases[n] ? "pointer" : "default", filter: bases[n] ? `drop-shadow(0 0 6px ${C.amber})` : "none" }}
-          onClick={() => bases[n] && onTapBase(n)}
-        />
+        <g key={n}>
+          <rect
+            x={pos[n][0] - 10}
+            y={pos[n][1] - 10}
+            width="20"
+            height="20"
+            transform={`rotate(45 ${pos[n][0]} ${pos[n][1]})`}
+            fill={baseFill(n)}
+            stroke={baseStroke(n)}
+            strokeWidth="2.5"
+            style={{ filter: bases[n] ? `drop-shadow(0 0 6px ${C.amber})` : "none" }}
+          />
+          {bases[n] && names && names[n] && (
+            <text x={labelPos[n][0]} y={labelPos[n][1]} textAnchor={labelAnchor[n]} fill={C.amber} fontFamily="IBM Plex Mono, monospace" fontSize="11" fontWeight="700">
+              {names[n]}
+            </text>
+          )}
+        </g>
       ))}
       <rect x={pos.home[0] - 9} y={pos.home[1] - 9} width="18" height="18" fill={C.chalk} stroke={C.dirt} strokeWidth="2" transform={`rotate(45 ${pos.home[0]} ${pos.home[1]})`} />
     </svg>
@@ -282,7 +296,7 @@ function Scorebook() {
     setActiveGame(g);
     const { error } = await supabase.from("games").update(gameToRow(g)).eq("id", g.id);
     if (error) console.error("game update failed", error);
-    setGameIndex((idx) => idx.map((e) => (e.id === g.id ? { ...e, status: g.status, ourScore: g.ourScore, theirScore: g.theirScore } : e)));
+    setGameIndex((idx) => idx.map((e) => (e.id === g.id ? { ...e, status: g.status, ourScore: g.ourScore, theirScore: g.theirScore, opponent: g.opponent, date: g.date } : e)));
   }, []);
 
   const openGame = useCallback(async (id) => {
@@ -290,6 +304,12 @@ function Scorebook() {
     if (error || !data) return;
     setActiveGame(rowToGame(data));
     setView(data.status === "final" ? "summary" : "live");
+  }, []);
+
+  const deleteGame = useCallback(async (id) => {
+    await supabase.from("games").delete().eq("id", id);
+    setGameIndex((idx) => idx.filter((g) => g.id !== id));
+    setActiveGame((g) => (g && g.id === id ? null : g));
   }, []);
 
   // realtime: keep the open game in sync for viewers watching along
@@ -411,14 +431,62 @@ function Scorebook() {
       outs: o.out ? Math.max(0, activeGame.outs - 1) : activeGame.outs,
     });
   };
-  const endGame = () => { if (activeGame) { persistGame({ ...activeGame, status: "final" }); setView("summary"); } };
+
+  /* ---------- defense: positions + fielding + pitching ---------- */
+  const setPosition = (playerId, pos) => {
+    if (!activeGame) return;
+    const positions = { ...activeGame.defense.positions };
+    if (pos) positions[playerId] = pos; else delete positions[playerId];
+    persistGame({ ...activeGame, defense: { ...activeGame.defense, positions } });
+  };
+  const bumpFielding = (playerId, stat, delta) => {
+    if (!activeGame) return;
+    const current = activeGame.fielding[playerId] || { PO: 0, A: 0, E: 0 };
+    const next = { ...current, [stat]: Math.max(0, current[stat] + delta) };
+    persistGame({ ...activeGame, fielding: { ...activeGame.fielding, [playerId]: next } });
+  };
+  const setOurPitcher = (playerId) => {
+    if (!activeGame) return;
+    const prev = activeGame.pitching;
+    const history = prev.ourPitcherId && prev.ourCount > 0 ? [...prev.ourHistory, { playerId: prev.ourPitcherId, pitches: prev.ourCount }] : prev.ourHistory;
+    persistGame({ ...activeGame, pitching: { ...prev, ourPitcherId: playerId, ourCount: 0, ourHistory: history } });
+  };
+  const bumpOurPitchCount = (delta) => {
+    if (!activeGame) return;
+    const prev = activeGame.pitching;
+    persistGame({ ...activeGame, pitching: { ...prev, ourCount: Math.max(0, prev.ourCount + delta) } });
+  };
+  const setTheirPitcherName = (name) => {
+    if (!activeGame) return;
+    persistGame({ ...activeGame, pitching: { ...activeGame.pitching, theirName: name } });
+  };
+  const bumpTheirPitchCount = (delta) => {
+    if (!activeGame) return;
+    const prev = activeGame.pitching;
+    persistGame({ ...activeGame, pitching: { ...prev, theirCount: Math.max(0, prev.theirCount + delta) } });
+  };
+
+  const endGame = () => {
+    if (!activeGame) return;
+    const prev = activeGame.pitching;
+    const history = prev.ourPitcherId && prev.ourCount > 0 ? [...prev.ourHistory, { playerId: prev.ourPitcherId, pitches: prev.ourCount }] : prev.ourHistory;
+    const g = { ...activeGame, status: "final", pitching: { ...prev, ourHistory: history } };
+    persistGame(g);
+    setView("summary");
+  };
+  const reopenGame = () => {
+    if (!activeGame) return;
+    persistGame({ ...activeGame, status: "live" });
+    setView("live");
+  };
+  const updateGameMeta = (patch) => {
+    if (!activeGame) return;
+    persistGame({ ...activeGame, ...patch });
+  };
 
   /* ---------- recap generation ----------
-     Requires your own Anthropic API key set as an env var and called from a
-     server route — browsers can't call api.anthropic.com directly with a key
-     safely. See README "Recap generation" for a ready-to-deploy Vercel
-     function you can drop in at /api/recap. Until that's set up, this just
-     leaves the recap box empty for you to write by hand. */
+     Calls a serverless function (/api/recap) so the Anthropic API key stays
+     server-side. Requires ANTHROPIC_API_KEY set in Vercel's env vars. */
   const [generating, setGenerating] = useState(false);
   const generateRecap = async () => {
     if (!activeGame) return;
@@ -480,7 +548,7 @@ function Scorebook() {
   return (
     <Wrap>
       <TopBar scorekeeper={scorekeeper} setScorekeeper={setScorekeeper} setView={setView} />
-      <div style={{ maxWidth: 860, margin: "0 auto", padding: "20px 16px 60px" }}>
+      <div style={{ maxWidth: 1080, margin: "0 auto", padding: "20px 16px 60px" }}>
         {view === "home" && (
           <HomeView
             teams={teams}
@@ -500,6 +568,7 @@ function Scorebook() {
             addPlayer={addPlayer}
             removePlayer={removePlayer}
             openGame={openGame}
+            deleteGame={deleteGame}
             goNewGame={() => setView("newgame")}
             goSeason={() => setView("season")}
             goHome={() => setView("home")}
@@ -524,6 +593,12 @@ function Scorebook() {
             skipHalf={skipHalf}
             undoLast={undoLast}
             endGame={endGame}
+            setPosition={setPosition}
+            bumpFielding={bumpFielding}
+            setOurPitcher={setOurPitcher}
+            bumpOurPitchCount={bumpOurPitchCount}
+            setTheirPitcherName={setTheirPitcherName}
+            bumpTheirPitchCount={bumpTheirPitchCount}
             goHome={() => setView("home")}
           />
         )}
@@ -532,9 +607,13 @@ function Scorebook() {
             game={activeGame}
             team={teams.find((t) => t.id === activeGame.teamId)}
             players={players}
+            scorekeeper={scorekeeper}
             generating={generating}
             generateRecap={generateRecap}
             updateReport={(text) => persistGame({ ...activeGame, report: text })}
+            updateGameMeta={updateGameMeta}
+            reopenGame={reopenGame}
+            deleteGame={async (id) => { await deleteGame(id); setView("home"); }}
             goHome={() => setView("home")}
           />
         )}
@@ -557,6 +636,11 @@ function Wrap({ children }) {
         body { margin: 0; }
         button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid ${C.amber}; outline-offset: 2px; }
         input, select, textarea { font-family: 'Inter', sans-serif; }
+        .live-grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
+        @media (min-width: 820px) {
+          .live-grid { grid-template-columns: 1fr 300px; align-items: start; }
+          .live-grid .sidebar { position: sticky; top: 76px; }
+        }
       `}</style>
       {children}
     </div>
@@ -565,7 +649,7 @@ function Wrap({ children }) {
 function TopBar({ scorekeeper, setScorekeeper, setView }) {
   return (
     <div style={{ background: C.greenDeep, borderBottom: `1px solid ${C.line}33`, position: "sticky", top: 0, zIndex: 10 }}>
-      <div style={{ maxWidth: 860, margin: "0 auto", padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+      <div style={{ maxWidth: 1080, margin: "0 auto", padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
         <div onClick={() => setView("home")} style={{ cursor: "pointer", display: "flex", alignItems: "baseline", gap: 8 }}>
           <span style={{ fontFamily: "Oswald, sans-serif", fontWeight: 700, fontSize: 22, color: C.chalk, letterSpacing: 0.5 }}>SCOREBOOK</span>
           <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 11, color: C.amber, letterSpacing: 1.5 }}>PRIVATE LEAGUE</span>
@@ -652,7 +736,7 @@ function HomeView({ teams, gameIndex, scorekeeper, addTeam, openTeam, openGame }
 }
 
 /* ---------------- TEAM ---------------- */
-function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, openGame, goNewGame, goSeason, goHome }) {
+function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, openGame, deleteGame, goNewGame, goSeason, goHome }) {
   const [name, setName] = useState("");
   const [num, setNum] = useState("");
   if (!team) return <div style={{ color: C.chalk }}>Team not found. <a onClick={goHome} style={{ color: C.amber, cursor: "pointer" }}>Go home</a></div>;
@@ -685,15 +769,24 @@ function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, 
       <Card>
         {games.length === 0 && <p style={{ color: C.chalkDim, margin: 0 }}>No games logged yet.</p>}
         {games.map((g) => (
-          <div key={g.id} onClick={() => openGame(g.id)} style={{ cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${C.line}22` }}>
-            <div>
+          <div key={g.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${C.line}22`, gap: 10 }}>
+            <div onClick={() => openGame(g.id)} style={{ cursor: "pointer", flex: 1 }}>
               <div style={{ color: C.chalk, fontFamily: "Oswald, sans-serif", fontWeight: 500 }}>vs {g.opponent}</div>
               <div style={{ color: C.chalkDim, fontSize: 12, fontFamily: "IBM Plex Mono, monospace" }}>{g.date}</div>
             </div>
-            <div style={{ textAlign: "right" }}>
+            <div onClick={() => openGame(g.id)} style={{ cursor: "pointer", textAlign: "right" }}>
               <div style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, fontWeight: 600 }}>{g.ourScore} – {g.theirScore}</div>
               <div style={{ fontSize: 11, color: g.status === "live" ? C.amber : C.chalkDim, textTransform: "uppercase", letterSpacing: 1 }}>{g.status}</div>
             </div>
+            {scorekeeper && (
+              <button
+                onClick={() => { if (window.confirm(`Delete the game vs ${g.opponent} (${g.date})? This can't be undone.`)) deleteGame(g.id); }}
+                style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 16, padding: 4 }}
+                title="Delete game"
+              >
+                ✕
+              </button>
+            )}
           </div>
         ))}
       </Card>
@@ -770,81 +863,213 @@ function Field({ label, children }) {
   );
 }
 
+/* ---------------- BATTING PREVIEW (at bat / on deck / in the hole) ---------------- */
+function BattingPreview({ lineup, players, currentBatterIndex }) {
+  if (!lineup || lineup.length === 0) return null;
+  const at = (offset) => {
+    const p = players.find((x) => x.id === lineup[(currentBatterIndex + offset) % lineup.length]);
+    return p ? `#${p.number || "—"} ${p.name}` : "—";
+  };
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <Eyebrow>Batting order</Eyebrow>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+        <div>
+          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.amber, letterSpacing: 1, marginBottom: 3 }}>AT BAT</div>
+          <div style={{ color: C.chalk, fontFamily: "Oswald, sans-serif", fontSize: 15 }}>{at(0)}</div>
+        </div>
+        <div>
+          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1, marginBottom: 3 }}>ON DECK</div>
+          <div style={{ color: C.chalkDim, fontFamily: "Oswald, sans-serif", fontSize: 15 }}>{at(1)}</div>
+        </div>
+        <div>
+          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1, marginBottom: 3 }}>IN THE HOLE</div>
+          <div style={{ color: C.chalkDim, fontFamily: "Oswald, sans-serif", fontSize: 15 }}>{at(2)}</div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 /* ---------------- LIVE GAME ---------------- */
 function LiveGameView(props) {
-  const { game, team, players, usBatting, scorekeeper, selectedBase, recordOutcome, tapBase, runnerAction, defenseOut, theirRun, skipHalf, undoLast, endGame, goHome } = props;
+  const {
+    game, team, players, usBatting, scorekeeper, selectedBase,
+    recordOutcome, tapBase, runnerAction, defenseOut, theirRun, skipHalf, undoLast, endGame,
+    setPosition, bumpFielding, setOurPitcher, bumpOurPitchCount, setTheirPitcherName, bumpTheirPitchCount,
+    goHome,
+  } = props;
   const batter = players.find((p) => p.id === game.lineup[game.currentBatterIndex % game.lineup.length]);
-  const recentPlays = [...game.plays].slice(-6).reverse();
+  const recentPlays = [...game.plays].slice(-14).reverse();
+  const baseNames = {
+    1: game.bases[1] ? firstName((players.find((p) => p.id === game.bases[1]) || {}).name) : null,
+    2: game.bases[2] ? firstName((players.find((p) => p.id === game.bases[2]) || {}).name) : null,
+    3: game.bases[3] ? firstName((players.find((p) => p.id === game.bases[3]) || {}).name) : null,
+  };
+  const defensivePlayers = game.lineup.map((id) => players.find((p) => p.id === id)).filter(Boolean);
+  const ourPitcher = players.find((p) => p.id === game.pitching.ourPitcherId);
+
   return (
     <div>
       <BackLink onClick={goHome}>Home</BackLink>
       <ScoreHeader game={game} team={team} />
-      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16 }}>
-        <Card style={{ flex: "0 0 auto" }}>
-          <Diamond bases={game.bases} onTapBase={scorekeeper ? tapBase : () => {}} />
-          <div style={{ fontFamily: "IBM Plex Mono, monospace", color: C.chalkDim, fontSize: 11, marginTop: 6, textAlign: "center" }}>Outs: <span style={{ color: C.amber, fontWeight: 700 }}>{game.outs}</span> / 3</div>
-        </Card>
-        {selectedBase != null && scorekeeper && (
-          <Card style={{ flex: 1, minWidth: 220 }}>
-            <Eyebrow>Runner on base {selectedBase}</Eyebrow>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              <Btn size="sm" onClick={() => runnerAction("advance")}>Advance 1 Base</Btn>
-              <Btn size="sm" tone="amber" onClick={() => runnerAction("score-rbi")}>Scores (RBI)</Btn>
-              <Btn size="sm" tone="amber" onClick={() => runnerAction("score-norbi")}>Scores (No RBI)</Btn>
-              <Btn size="sm" tone="red" onClick={() => runnerAction("out")}>Out on Bases</Btn>
+
+      <div className="live-grid">
+        <div>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16 }}>
+            <Card style={{ flex: "0 0 auto" }}>
+              <Diamond bases={game.bases} names={baseNames} />
+              <div style={{ fontFamily: "IBM Plex Mono, monospace", color: C.chalkDim, fontSize: 11, marginTop: 6, textAlign: "center" }}>Outs: <span style={{ color: C.amber, fontWeight: 700 }}>{game.outs}</span> / 3</div>
+            </Card>
+
+            {selectedBase != null && scorekeeper && (
+              <Card style={{ flex: 1, minWidth: 220 }}>
+                <Eyebrow>Runner on base {selectedBase}</Eyebrow>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  <Btn size="sm" onClick={() => runnerAction("advance")}>Advance 1 Base</Btn>
+                  <Btn size="sm" tone="amber" onClick={() => runnerAction("score-rbi")}>Scores (RBI)</Btn>
+                  <Btn size="sm" tone="amber" onClick={() => runnerAction("score-norbi")}>Scores (No RBI)</Btn>
+                  <Btn size="sm" tone="red" onClick={() => runnerAction("out")}>Out on Bases</Btn>
+                </div>
+              </Card>
+            )}
+          </div>
+          {scorekeeper && [1, 2, 3].some((n) => game.bases[n]) && (
+            <div style={{ marginTop: -8, marginBottom: 16 }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {[1, 2, 3].filter((n) => game.bases[n]).map((n) => (
+                  <button key={n} onClick={() => tapBase(n)} style={{ fontSize: 12, padding: "5px 10px", borderRadius: 14, border: `1px solid ${C.amber}`, background: selectedBase === n ? C.amber : "transparent", color: selectedBase === n ? C.ink : C.amber, cursor: "pointer" }}>
+                    Runner on {n === 1 ? "1st" : n === 2 ? "2nd" : "3rd"}: {baseNames[n]}
+                  </button>
+                ))}
+              </div>
             </div>
+          )}
+
+          {!scorekeeper && <BattingPreview lineup={game.lineup} players={players} currentBatterIndex={game.currentBatterIndex} />}
+
+          {!scorekeeper && (
+            <Card style={{ marginBottom: 16 }}>
+              <p style={{ color: C.chalkDim, margin: 0, fontSize: 13 }}>You're in Viewer Mode — following along live.</p>
+            </Card>
+          )}
+
+          {scorekeeper && usBatting && (
+            <Card style={{ marginBottom: 16 }}>
+              <Eyebrow>At bat</Eyebrow>
+              <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 24, color: C.chalk, marginBottom: 4 }}>#{batter ? batter.number || "—" : "—"} {batter ? batter.name : "—"}</div>
+              <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 12, color: C.chalkDim, marginBottom: 12 }}>
+                On deck: {(() => { const p = players.find((x) => x.id === game.lineup[(game.currentBatterIndex + 1) % game.lineup.length]); return p ? p.name : "—"; })()}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(80px, 1fr))", gap: 8 }}>
+                {OUTCOMES.map((o) => (
+                  <button key={o.key} title={o.full} onClick={() => recordOutcome(o.key)} style={{ padding: "14px 6px", borderRadius: 10, border: `1px solid ${C.line}55`, background: o.out ? C.navy : o.hit ? C.amber : C.dirt, color: o.out ? C.chalk : o.hit ? C.ink : C.chalk, fontFamily: "IBM Plex Mono, monospace", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
+                <Btn tone="ghost" size="sm" onClick={undoLast} disabled={game.plays.length === 0}>Undo Last Play</Btn>
+                <Btn tone="ghost" size="sm" onClick={skipHalf}>Skip to Next Half-Inning</Btn>
+              </div>
+            </Card>
+          )}
+
+          {scorekeeper && usBatting && (
+            <Card style={{ marginBottom: 16 }}>
+              <Eyebrow>Their pitcher (pitch count)</Eyebrow>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <input
+                  value={game.pitching.theirName}
+                  onChange={(e) => setTheirPitcherName(e.target.value)}
+                  placeholder="Pitcher name / number"
+                  style={{ flex: "1 1 160px", padding: "8px 10px", borderRadius: 8, border: `1px solid ${C.line}`, background: C.chalk, color: C.ink, fontSize: 13 }}
+                />
+                <span style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, fontSize: 20, fontWeight: 700, minWidth: 30, textAlign: "center" }}>{game.pitching.theirCount}</span>
+                <Btn size="sm" onClick={() => bumpTheirPitchCount(1)}>+1 Pitch</Btn>
+                <Btn size="sm" tone="ghost" onClick={() => bumpTheirPitchCount(-1)}>-1</Btn>
+              </div>
+            </Card>
+          )}
+
+          {scorekeeper && !usBatting && (
+            <>
+              <Card style={{ marginBottom: 16 }}>
+                <Eyebrow>On defense — {game.opponent} batting</Eyebrow>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <Btn onClick={defenseOut} style={{ background: C.navy }}>Record Out</Btn>
+                  <Btn tone="amber" onClick={() => theirRun(1)}>+1 Run ({game.opponent})</Btn>
+                  <Btn tone="ghost" size="sm" onClick={() => theirRun(-1)}>-1 Run</Btn>
+                  <Btn tone="ghost" size="sm" onClick={skipHalf}>Skip to Next Half-Inning</Btn>
+                </div>
+              </Card>
+
+              <Card style={{ marginBottom: 16 }}>
+                <Eyebrow>Our pitcher</Eyebrow>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+                  <select value={game.pitching.ourPitcherId || ""} onChange={(e) => setOurPitcher(e.target.value || null)} style={{ ...selStyle, width: "auto", flex: "1 1 160px" }}>
+                    <option value="">Select pitcher…</option>
+                    {defensivePlayers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                  <span style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, fontSize: 20, fontWeight: 700, minWidth: 30, textAlign: "center" }}>{game.pitching.ourCount}</span>
+                  <Btn size="sm" onClick={() => bumpOurPitchCount(1)} disabled={!game.pitching.ourPitcherId}>+1 Pitch</Btn>
+                  <Btn size="sm" tone="ghost" onClick={() => bumpOurPitchCount(-1)} disabled={!game.pitching.ourPitcherId}>-1</Btn>
+                </div>
+                {ourPitcher && <div style={{ fontSize: 12, color: C.chalkDim, fontFamily: "IBM Plex Mono, monospace" }}>Now pitching: {ourPitcher.name}</div>}
+              </Card>
+
+              <Card style={{ marginBottom: 16 }}>
+                <Eyebrow>Defensive positions & fielding</Eyebrow>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {defensivePlayers.map((p) => {
+                    const f = game.fielding[p.id] || { PO: 0, A: 0, E: 0 };
+                    return (
+                      <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", borderBottom: `1px solid ${C.line}22`, paddingBottom: 8 }}>
+                        <span style={{ color: C.chalk, minWidth: 110, fontSize: 13 }}>{p.name}</span>
+                        <select value={game.defense.positions[p.id] || ""} onChange={(e) => setPosition(p.id, e.target.value)} style={{ ...selStyle, width: 68, padding: "5px 6px", fontSize: 12 }}>
+                          <option value="">–</option>
+                          {POSITIONS.map((pos) => <option key={pos} value={pos}>{pos}</option>)}
+                        </select>
+                        {["PO", "A", "E"].map((stat) => (
+                          <span key={stat} style={{ display: "flex", alignItems: "center", gap: 3, fontFamily: "IBM Plex Mono, monospace", fontSize: 12 }}>
+                            <button onClick={() => bumpFielding(p.id, stat, -1)} style={miniBtn}>-</button>
+                            <span style={{ color: C.amber, minWidth: 26, textAlign: "center" }}>{stat} {f[stat]}</span>
+                            <button onClick={() => bumpFielding(p.id, stat, 1)} style={miniBtn}>+</button>
+                          </span>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+              </Card>
+            </>
+          )}
+
+          {scorekeeper && <Btn tone="red" size="lg" onClick={endGame}>End Game & Build Recap</Btn>}
+        </div>
+
+        <div className="sidebar">
+          <Eyebrow>Recent plays</Eyebrow>
+          <Card>
+            {recentPlays.length === 0 && <p style={{ color: C.chalkDim, margin: 0, fontSize: 13 }}>No plays recorded yet.</p>}
+            {recentPlays.map((p) => {
+              const pl = players.find((x) => x.id === p.playerId);
+              const o = outcomeByKey(p.outcome);
+              return (
+                <div key={p.id} style={{ padding: "6px 0", borderBottom: `1px solid ${C.line}22`, fontSize: 13 }}>
+                  <div style={{ color: C.chalk }}>{p.half === "top" ? "T" : "B"}{p.inning} — {pl ? pl.name : "?"}</div>
+                  <div style={{ color: C.amber, fontFamily: "IBM Plex Mono, monospace", fontSize: 12 }}>{o.full}{p.rbi ? ` · ${p.rbi} RBI` : ""}</div>
+                </div>
+              );
+            })}
           </Card>
-        )}
+        </div>
       </div>
-      {!scorekeeper && (
-        <Card style={{ marginBottom: 16 }}><p style={{ color: C.chalkDim, margin: 0, fontSize: 13 }}>You're in Viewer Mode — following along live.</p></Card>
-      )}
-      {scorekeeper && usBatting && (
-        <Card style={{ marginBottom: 16 }}>
-          <Eyebrow>At bat</Eyebrow>
-          <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 24, color: C.chalk, marginBottom: 12 }}>#{batter ? batter.number || "—" : "—"} {batter ? batter.name : "—"}</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(80px, 1fr))", gap: 8 }}>
-            {OUTCOMES.map((o) => (
-              <button key={o.key} title={o.full} onClick={() => recordOutcome(o.key)} style={{ padding: "14px 6px", borderRadius: 10, border: `1px solid ${C.line}55`, background: o.out ? C.navy : o.hit ? C.amber : C.dirt, color: o.out ? C.chalk : o.hit ? C.ink : C.chalk, fontFamily: "IBM Plex Mono, monospace", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
-                {o.label}
-              </button>
-            ))}
-          </div>
-          <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-            <Btn tone="ghost" size="sm" onClick={undoLast} disabled={game.plays.length === 0}>Undo Last Play</Btn>
-            <Btn tone="ghost" size="sm" onClick={skipHalf}>Skip to Next Half-Inning</Btn>
-          </div>
-        </Card>
-      )}
-      {scorekeeper && !usBatting && (
-        <Card style={{ marginBottom: 16 }}>
-          <Eyebrow>On defense — {game.opponent} batting</Eyebrow>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <Btn onClick={defenseOut} style={{ background: C.navy }}>Record Out</Btn>
-            <Btn tone="amber" onClick={() => theirRun(1)}>+1 Run ({game.opponent})</Btn>
-            <Btn tone="ghost" size="sm" onClick={() => theirRun(-1)}>-1 Run</Btn>
-            <Btn tone="ghost" size="sm" onClick={skipHalf}>Skip to Next Half-Inning</Btn>
-          </div>
-        </Card>
-      )}
-      <Eyebrow>Recent plays</Eyebrow>
-      <Card style={{ marginBottom: 16 }}>
-        {recentPlays.length === 0 && <p style={{ color: C.chalkDim, margin: 0, fontSize: 13 }}>No plays recorded yet.</p>}
-        {recentPlays.map((p) => {
-          const pl = players.find((x) => x.id === p.playerId);
-          const o = outcomeByKey(p.outcome);
-          return (
-            <div key={p.id} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: `1px solid ${C.line}22`, fontSize: 13 }}>
-              <span style={{ color: C.chalk }}>{p.half === "top" ? "T" : "B"}{p.inning} — {pl ? pl.name : "?"}</span>
-              <span style={{ color: C.amber, fontFamily: "IBM Plex Mono, monospace" }}>{o.full}{p.rbi ? ` · ${p.rbi} RBI` : ""}</span>
-            </div>
-          );
-        })}
-      </Card>
-      {scorekeeper && <Btn tone="red" size="lg" onClick={endGame}>End Game & Build Recap</Btn>}
     </div>
   );
 }
+const miniBtn = { background: "none", border: `1px solid ${C.line}`, color: C.chalkDim, borderRadius: 4, width: 18, height: 18, cursor: "pointer", fontSize: 12, lineHeight: 1, padding: 0 };
+
 function ScoreHeader({ game, team }) {
   return (
     <Card style={{ marginBottom: 16, background: C.navy, border: "none" }}>
@@ -863,17 +1088,54 @@ function ScoreHeader({ game, team }) {
 }
 
 /* ---------------- SUMMARY ---------------- */
-function SummaryView({ game, team, players, generating, generateRecap, updateReport, goHome }) {
+function SummaryView({ game, team, players, scorekeeper, generating, generateRecap, updateReport, updateGameMeta, reopenGame, deleteGame, goHome }) {
   const rows = game.lineup.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: computeStatsFromPlays(p.id, game.plays, game.scores) }));
+  const [editing, setEditing] = useState(false);
+  const [opponent, setOpponent] = useState(game.opponent);
+  const [date, setDate] = useState(game.date);
+  const [ourScore, setOurScore] = useState(game.ourScore);
+  const [theirScore, setTheirScore] = useState(game.theirScore);
+
+  const pitchers = [
+    ...game.pitching.ourHistory,
+    ...(game.pitching.ourPitcherId ? [{ playerId: game.pitching.ourPitcherId, pitches: game.pitching.ourCount }] : []),
+  ];
+
   const emailHref = () => {
     const subject = encodeURIComponent(`${team ? team.name : "Game"} vs ${game.opponent} — ${game.date}`);
     const bodyLines = [`Final: ${team ? team.name : "Us"} ${game.ourScore} – ${game.opponent} ${game.theirScore}`, "", game.report || "", "", "Box score:", ...rows.map(({ p, s }) => `${p.name}: ${s.AB} AB, ${s.H} H, ${s.R} R, ${s.RBI} RBI`)];
     return `mailto:?subject=${subject}&body=${encodeURIComponent(bodyLines.join("\n"))}`;
   };
+
   return (
     <div>
       <BackLink onClick={goHome}>Home</BackLink>
       <ScoreHeader game={game} team={team} />
+
+      {scorekeeper && (
+        <Card style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: editing ? 12 : 0 }}>
+            <Eyebrow>Game settings</Eyebrow>
+            <Btn size="sm" tone="ghost" onClick={() => setEditing((e) => !e)}>{editing ? "Cancel" : "Edit Game"}</Btn>
+          </div>
+          {editing && (
+            <>
+              <Field label="Opponent"><input value={opponent} onChange={(e) => setOpponent(e.target.value)} style={selStyle} /></Field>
+              <Field label="Date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={selStyle} /></Field>
+              <div style={{ display: "flex", gap: 10 }}>
+                <Field label="Our score"><input type="number" value={ourScore} onChange={(e) => setOurScore(Number(e.target.value))} style={selStyle} /></Field>
+                <Field label="Their score"><input type="number" value={theirScore} onChange={(e) => setTheirScore(Number(e.target.value))} style={selStyle} /></Field>
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <Btn tone="amber" size="sm" onClick={() => { updateGameMeta({ opponent, date, ourScore, theirScore }); setEditing(false); }}>Save Changes</Btn>
+                <Btn tone="ghost" size="sm" onClick={reopenGame}>Reopen Game (Fix Plays)</Btn>
+                <Btn tone="red" size="sm" onClick={() => { if (window.confirm(`Delete this game vs ${game.opponent}? This can't be undone.`)) deleteGame(game.id); }}>Delete Game</Btn>
+              </div>
+            </>
+          )}
+        </Card>
+      )}
+
       <Eyebrow>Final Box Score</Eyebrow>
       <Card style={{ marginBottom: 16, overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 13 }}>
@@ -887,6 +1149,32 @@ function SummaryView({ game, team, players, generating, generateRecap, updateRep
           ))}</tbody>
         </table>
       </Card>
+
+      {(pitchers.length > 0 || Object.keys(game.fielding).length > 0) && (
+        <>
+          <Eyebrow>Pitching & Fielding</Eyebrow>
+          <Card style={{ marginBottom: 16 }}>
+            {pitchers.length > 0 && (
+              <div style={{ marginBottom: 10 }}>
+                {pitchers.map((h, i) => {
+                  const p = players.find((x) => x.id === h.playerId);
+                  return <div key={i} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>{p ? p.name : "?"} — {h.pitches} pitches</div>;
+                })}
+                {game.pitching.theirName && <div style={{ color: C.chalkDim, fontSize: 13, fontFamily: "IBM Plex Mono, monospace", marginTop: 4 }}>{game.opponent} — {game.pitching.theirName}: {game.pitching.theirCount} pitches</div>}
+              </div>
+            )}
+            {Object.keys(game.fielding).length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                {Object.entries(game.fielding).filter(([, f]) => f.PO || f.A || f.E).map(([pid, f]) => {
+                  const p = players.find((x) => x.id === pid);
+                  return <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>{p ? p.name : "?"} — {f.PO} PO, {f.A} A, {f.E} E</div>;
+                })}
+              </div>
+            )}
+          </Card>
+        </>
+      )}
+
       <Eyebrow>Game recap</Eyebrow>
       <Card style={{ marginBottom: 16 }}>
         {!game.report && <Btn tone="amber" onClick={generateRecap} disabled={generating}>{generating ? "Writing recap…" : "Generate Recap"}</Btn>}
@@ -921,36 +1209,97 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
   const allScores = games.flatMap((g) => g.scores || []);
   const rows = rosterPlayers.map((p) => ({ p, s: computeStatsFromPlays(p.id, allPlays, allScores) })).sort((a, b) => b.s[sortKey] - a.s[sortKey]);
   const sortable = ["AVG", "OBP", "SLG", "H", "R", "RBI", "HR", "BB", "K"];
+
+  const fieldingTotals = {};
+  const pitchTotals = {};
+  games.forEach((g) => {
+    Object.entries(g.fielding || {}).forEach(([pid, f]) => {
+      fieldingTotals[pid] = fieldingTotals[pid] || { PO: 0, A: 0, E: 0 };
+      fieldingTotals[pid].PO += f.PO || 0;
+      fieldingTotals[pid].A += f.A || 0;
+      fieldingTotals[pid].E += f.E || 0;
+    });
+    (g.pitching?.ourHistory || []).forEach((h) => {
+      pitchTotals[h.playerId] = (pitchTotals[h.playerId] || 0) + h.pitches;
+    });
+  });
+
   return (
     <div>
       <BackLink onClick={goHome}>Home</BackLink>
       <h1 style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 30, margin: "6px 0 16px" }}>Season Stats</h1>
+
       <Field label="Team">
-        <select value={teamId} onChange={(e) => setTeamId(e.target.value)} style={selStyle}>{teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}</select>
+        <select value={teamId} onChange={(e) => setTeamId(e.target.value)} style={selStyle}>
+          {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
       </Field>
+
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
         {sortable.map((k) => (
           <button key={k} onClick={() => setSortKey(k)} style={{ padding: "4px 10px", borderRadius: 14, fontSize: 12, fontFamily: "IBM Plex Mono, monospace", border: `1px solid ${sortKey === k ? C.amber : C.line}`, background: sortKey === k ? C.amber : "transparent", color: sortKey === k ? C.ink : C.chalkDim, cursor: "pointer" }}>{k}</button>
         ))}
       </div>
-      <Card style={{ overflowX: "auto" }}>
+
+      <Card style={{ overflowX: "auto", marginBottom: 16 }}>
         {loading && <p style={{ color: C.chalkDim }}>Loading games…</p>}
         {!loading && rows.length === 0 && <p style={{ color: C.chalkDim, margin: 0 }}>No finished games yet for this team.</p>}
         {!loading && rows.length > 0 && (
           <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 12.5, minWidth: 560 }}>
-            <thead><tr style={{ color: C.amber, textAlign: "left" }}>{["Player", "PA", "AB", "R", "H", "2B", "3B", "HR", "RBI", "BB", "K", "AVG", "OBP", "SLG"].map((h) => <th key={h} style={{ padding: "4px 6px", borderBottom: `1px solid ${C.line}55` }}>{h}</th>)}</tr></thead>
-            <tbody>{rows.map(({ p, s }) => (
-              <tr key={p.id} style={{ color: C.chalk }}>
-                <td style={{ padding: "4px 6px" }}>{p.name}</td><td style={{ padding: "4px 6px" }}>{s.PA}</td><td style={{ padding: "4px 6px" }}>{s.AB}</td>
-                <td style={{ padding: "4px 6px" }}>{s.R}</td><td style={{ padding: "4px 6px" }}>{s.H}</td><td style={{ padding: "4px 6px" }}>{s["2B"]}</td>
-                <td style={{ padding: "4px 6px" }}>{s["3B"]}</td><td style={{ padding: "4px 6px" }}>{s.HR}</td><td style={{ padding: "4px 6px" }}>{s.RBI}</td>
-                <td style={{ padding: "4px 6px" }}>{s.BB}</td><td style={{ padding: "4px 6px" }}>{s.K}</td><td style={{ padding: "4px 6px" }}>{fmt3(s.AVG)}</td>
-                <td style={{ padding: "4px 6px" }}>{fmt3(s.OBP)}</td><td style={{ padding: "4px 6px" }}>{fmt3(s.SLG)}</td>
+            <thead>
+              <tr style={{ color: C.amber, textAlign: "left" }}>
+                {["Player", "PA", "AB", "R", "H", "2B", "3B", "HR", "RBI", "BB", "K", "AVG", "OBP", "SLG"].map((h) => (
+                  <th key={h} style={{ padding: "4px 6px", borderBottom: `1px solid ${C.line}55` }}>{h}</th>
+                ))}
               </tr>
-            ))}</tbody>
+            </thead>
+            <tbody>
+              {rows.map(({ p, s }) => (
+                <tr key={p.id} style={{ color: C.chalk }}>
+                  <td style={{ padding: "4px 6px" }}>{p.name}</td>
+                  <td style={{ padding: "4px 6px" }}>{s.PA}</td>
+                  <td style={{ padding: "4px 6px" }}>{s.AB}</td>
+                  <td style={{ padding: "4px 6px" }}>{s.R}</td>
+                  <td style={{ padding: "4px 6px" }}>{s.H}</td>
+                  <td style={{ padding: "4px 6px" }}>{s["2B"]}</td>
+                  <td style={{ padding: "4px 6px" }}>{s["3B"]}</td>
+                  <td style={{ padding: "4px 6px" }}>{s.HR}</td>
+                  <td style={{ padding: "4px 6px" }}>{s.RBI}</td>
+                  <td style={{ padding: "4px 6px" }}>{s.BB}</td>
+                  <td style={{ padding: "4px 6px" }}>{s.K}</td>
+                  <td style={{ padding: "4px 6px" }}>{fmt3(s.AVG)}</td>
+                  <td style={{ padding: "4px 6px" }}>{fmt3(s.OBP)}</td>
+                  <td style={{ padding: "4px 6px" }}>{fmt3(s.SLG)}</td>
+                </tr>
+              ))}
+            </tbody>
           </table>
         )}
       </Card>
+
+      {(Object.keys(fieldingTotals).length > 0 || Object.keys(pitchTotals).length > 0) && (
+        <>
+          <Eyebrow>Season Pitching & Fielding</Eyebrow>
+          <Card style={{ overflowX: "auto" }}>
+            {Object.keys(pitchTotals).length > 0 && (
+              <div style={{ marginBottom: 10 }}>
+                {Object.entries(pitchTotals).map(([pid, total]) => {
+                  const p = rosterPlayers.find((x) => x.id === pid);
+                  return <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>{p ? p.name : "?"} — {total} pitches thrown</div>;
+                })}
+              </div>
+            )}
+            {Object.keys(fieldingTotals).length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                {Object.entries(fieldingTotals).map(([pid, f]) => {
+                  const p = rosterPlayers.find((x) => x.id === pid);
+                  return <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>{p ? p.name : "?"} — {f.PO} PO, {f.A} A, {f.E} E</div>;
+                })}
+              </div>
+            )}
+          </Card>
+        </>
+      )}
     </div>
   );
 }
