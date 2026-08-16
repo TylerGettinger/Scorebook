@@ -422,7 +422,23 @@ function Scorebook() {
       const runners = [1, 2, 3].filter((n) => g.bases[n]).map((n) => g.bases[n]);
       g = { ...g, bases: { 1: null, 2: null, 3: null } };
       [...runners, batter.id].forEach((pid) => { g = scoreRunner(g, pid, true); });
+    } else if (o.key === "1B" || o.key === "2B" || o.key === "3B") {
+      // On a hit, every existing runner advances the same number of bases as the
+      // batter — not just runners directly blocking the batter's target base.
+      // Otherwise a runner on 1st can get left behind when the batter reaches 2nd or 3rd.
+      const advance = o.bases;
+      let g2 = { ...g, bases: { 1: null, 2: null, 3: null } };
+      [3, 2, 1].forEach((fromBase) => {
+        const runnerId = g.bases[fromBase];
+        if (!runnerId) return;
+        const dest = fromBase + advance;
+        g2 = dest >= 4 ? scoreRunner(g2, runnerId, true) : { ...g2, bases: { ...g2.bases, [dest]: runnerId } };
+      });
+      g = { ...g2, bases: { ...g2.bases, [advance]: batter.id } };
     } else if (o.bases > 0) {
+      // Walks / HBP / errors / fielder's choice: only force runners who are
+      // directly blocked off their base (a walk with a runner on 2nd but not 1st
+      // doesn't push that runner to 3rd).
       g = addRunner(g, o.bases, batter.id);
     }
     g = { ...g, currentBatterIndex: g.currentBatterIndex + 1, count: { balls: 0, strikes: 0 } };
