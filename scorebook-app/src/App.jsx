@@ -63,6 +63,7 @@ function emptyGameState() {
     half: "top",
     outs: 0,
     totalPitchingOuts: 0, // cumulative outs recorded while WE are on defense (doesn't reset each half)
+    count: { balls: 0, strikes: 0 }, // current batter's live ball-strike count
     bases: { 1: null, 2: null, 3: null },
     plays: [],
     scores: [],
@@ -392,7 +393,7 @@ function Scorebook() {
   const flipHalf = (g) => {
     const half = g.half === "top" ? "bottom" : "top";
     const inning = g.half === "top" ? g.inning : g.inning + 1;
-    return { ...g, half, inning, outs: 0, bases: { 1: null, 2: null, 3: null }, currentPlayId: null };
+    return { ...g, half, inning, outs: 0, bases: { 1: null, 2: null, 3: null }, currentPlayId: null, count: { balls: 0, strikes: 0 } };
   };
   const scoreRunner = (g, playerId, creditRbi) => {
     const scores = [...g.scores, { playerId, playId: g.currentPlayId, creditRbi }];
@@ -409,13 +410,13 @@ function Scorebook() {
     return { ...g, bases: { ...g.bases, [base]: playerId } };
   };
 
-  const recordOutcome = (key) => {
+  const recordOutcome = (key, pitchingPatch) => {
     if (!activeGame || !usBatting) return;
     const o = outcomeByKey(key);
     const batter = players.find((p) => p.id === activeGame.lineup[activeGame.currentBatterIndex % activeGame.lineup.length]);
     if (!batter) return;
     const play = { id: crypto.randomUUID(), playerId: batter.id, outcome: key, rbi: 0, inning: activeGame.inning, half: activeGame.half, ts: Date.now() };
-    let g = { ...activeGame, plays: [...activeGame.plays, play], currentPlayId: play.id };
+    let g = { ...activeGame, plays: [...activeGame.plays, play], currentPlayId: play.id, pitching: pitchingPatch || activeGame.pitching };
     if (o.out) g = { ...g, outs: g.outs + 1 };
     if (o.key === "HR") {
       const runners = [1, 2, 3].filter((n) => g.bases[n]).map((n) => g.bases[n]);
@@ -424,7 +425,7 @@ function Scorebook() {
     } else if (o.bases > 0) {
       g = addRunner(g, o.bases, batter.id);
     }
-    g = { ...g, currentBatterIndex: g.currentBatterIndex + 1 };
+    g = { ...g, currentBatterIndex: g.currentBatterIndex + 1, count: { balls: 0, strikes: 0 } };
     if (g.outs >= 3) g = flipHalf(g);
     persistGame(g);
   };
@@ -441,9 +442,15 @@ function Scorebook() {
     persistGame(g);
   };
 
-  const defenseOut = () => {
+  const defenseOut = (pitchingPatch) => {
     if (!activeGame) return;
-    let g = { ...activeGame, outs: activeGame.outs + 1, totalPitchingOuts: activeGame.totalPitchingOuts + 1 };
+    let g = {
+      ...activeGame,
+      outs: activeGame.outs + 1,
+      totalPitchingOuts: activeGame.totalPitchingOuts + 1,
+      count: { balls: 0, strikes: 0 },
+      pitching: pitchingPatch || activeGame.pitching,
+    };
     if (g.outs >= 3) g = flipHalf(g);
     persistGame(g);
   };
@@ -501,19 +508,47 @@ function Scorebook() {
       pitching: { ...archived, ourPitcherId: playerId, ourBalls: 0, ourStrikes: 0, ourEarnedRuns: 0, ourOutsAtStintStart: activeGame.totalPitchingOuts },
     });
   };
-  const bumpOurPitch = (type, delta) => {
-    if (!activeGame || !activeGame.pitching.ourPitcherId) return;
-    const key = type === "ball" ? "ourBalls" : "ourStrikes";
-    persistGame({ ...activeGame, pitching: { ...activeGame.pitching, [key]: Math.max(0, activeGame.pitching[key] + delta) } });
-  };
   const setTheirPitcherName = (name) => {
     if (!activeGame) return;
     persistGame({ ...activeGame, pitching: { ...activeGame.pitching, theirName: name } });
   };
-  const bumpTheirPitch = (type, delta) => {
+
+  // Ties the pitch-count buttons to the current batter's live ball/strike count.
+  // side: 'our' (we're pitching, on defense) or 'their' (they're pitching, we're batting).
+  // On a 4th ball, auto-records a walk; on a 3rd strike, auto-records a strikeout.
+  const bumpPitchAndCount = (side, type, delta) => {
     if (!activeGame) return;
-    const key = type === "ball" ? "theirBalls" : "theirStrikes";
-    persistGame({ ...activeGame, pitching: { ...activeGame.pitching, [key]: Math.max(0, activeGame.pitching[key] + delta) } });
+    if (side === "our" && (usBatting || !activeGame.pitching.ourPitcherId)) return;
+    if (side === "their" && !usBatting) return;
+
+    const pKey = side === "our" ? (type === "ball" ? "ourBalls" : "ourStrikes") : (type === "ball" ? "theirBalls" : "theirStrikes");
+    const newPitching = { ...activeGame.pitching, [pKey]: Math.max(0, activeGame.pitching[pKey] + delta) };
+
+    if (delta > 0) {
+      const nextBalls = type === "ball" ? activeGame.count.balls + 1 : activeGame.count.balls;
+      const nextStrikes = type === "strike" ? activeGame.count.strikes + 1 : activeGame.count.strikes;
+
+      if (type === "ball" && nextBalls >= 4) {
+        if (side === "their") { recordOutcome("BB", newPitching); return; }
+        // side === 'our': opponent's batter walks — we don't track their lineup, just reset the count.
+        persistGame({ ...activeGame, pitching: newPitching, count: { balls: 0, strikes: 0 } });
+        return;
+      }
+      if (type === "strike" && nextStrikes >= 3) {
+        if (side === "their") { recordOutcome("K", newPitching); return; }
+        defenseOut(newPitching);
+        return;
+      }
+      persistGame({ ...activeGame, pitching: newPitching, count: { balls: nextBalls, strikes: nextStrikes } });
+      return;
+    }
+
+    // delta < 0 (the "-1" undo buttons) — just back off the tally, no auto-triggers.
+    const nextCount = {
+      balls: type === "ball" ? Math.max(0, activeGame.count.balls + delta) : activeGame.count.balls,
+      strikes: type === "strike" ? Math.max(0, activeGame.count.strikes + delta) : activeGame.count.strikes,
+    };
+    persistGame({ ...activeGame, pitching: newPitching, count: nextCount });
   };
 
   const endGame = () => {
@@ -644,9 +679,8 @@ function Scorebook() {
             setPosition={setPosition}
             bumpFielding={bumpFielding}
             setOurPitcher={setOurPitcher}
-            bumpOurPitch={bumpOurPitch}
             setTheirPitcherName={setTheirPitcherName}
-            bumpTheirPitch={bumpTheirPitch}
+            bumpPitchAndCount={bumpPitchAndCount}
             goHome={() => setView("home")}
           />
         )}
@@ -947,6 +981,7 @@ function PitchCounter({ title, pitcherControl, balls, strikes, onBall, onStrike,
     <Card style={{ marginBottom: 16 }}>
       <Eyebrow>{title}</Eyebrow>
       {pitcherControl && <div style={{ marginBottom: 10 }}>{pitcherControl}</div>}
+      <div style={{ fontSize: 11, color: C.chalkDim, marginBottom: 10 }}>Tap here for every pitch — it updates the live count above and this pitcher's game totals together.</div>
       <div style={{ display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
         <div style={{ textAlign: "center" }}>
           <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>BALLS</div>
@@ -1017,7 +1052,7 @@ function LiveGameView(props) {
   const {
     game, team, players, usBatting, scorekeeper, selectedBase,
     recordOutcome, tapBase, runnerAction, defenseOut, theirRun, skipHalf, undoLast, endGame,
-    setPosition, bumpFielding, setOurPitcher, bumpOurPitch, setTheirPitcherName, bumpTheirPitch,
+    setPosition, bumpFielding, setOurPitcher, setTheirPitcherName, bumpPitchAndCount,
     goHome,
   } = props;
   const batter = players.find((p) => p.id === game.lineup[game.currentBatterIndex % game.lineup.length]);
@@ -1040,7 +1075,17 @@ function LiveGameView(props) {
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16 }}>
             <Card style={{ flex: "0 0 auto" }}>
               <Diamond bases={game.bases} names={baseNames} />
-              <div style={{ fontFamily: "IBM Plex Mono, monospace", color: C.chalkDim, fontSize: 11, marginTop: 6, textAlign: "center" }}>Outs: <span style={{ color: C.amber, fontWeight: 700 }}>{game.outs}</span> / 3</div>
+              <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 10 }}>
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>COUNT</div>
+                  <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 28, fontWeight: 700, color: C.amber }}>{game.count.balls}-{game.count.strikes}</div>
+                </div>
+                <div style={{ width: 1, background: `${C.line}55` }} />
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>OUTS</div>
+                  <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 28, fontWeight: 700, color: C.chalk }}>{game.outs}<span style={{ fontSize: 16, color: C.chalkDim }}>/3</span></div>
+                </div>
+              </div>
             </Card>
 
             {selectedBase != null && scorekeeper && (
@@ -1110,8 +1155,8 @@ function LiveGameView(props) {
               }
               balls={game.pitching.theirBalls}
               strikes={game.pitching.theirStrikes}
-              onBall={() => bumpTheirPitch("ball", 1)}
-              onStrike={() => bumpTheirPitch("strike", 1)}
+              onBall={() => bumpPitchAndCount("their", "ball", 1)}
+              onStrike={() => bumpPitchAndCount("their", "strike", 1)}
             />
           )}
 
@@ -1141,8 +1186,8 @@ function LiveGameView(props) {
                 }
                 balls={game.pitching.ourBalls}
                 strikes={game.pitching.ourStrikes}
-                onBall={() => bumpOurPitch("ball", 1)}
-                onStrike={() => bumpOurPitch("strike", 1)}
+                onBall={() => bumpPitchAndCount("our", "ball", 1)}
+                onStrike={() => bumpPitchAndCount("our", "strike", 1)}
                 disabled={!game.pitching.ourPitcherId}
               />
 
