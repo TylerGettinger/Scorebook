@@ -40,6 +40,23 @@ const OUTCOMES = [
 ];
 const outcomeByKey = (k) => OUTCOMES.find((o) => o.key === k);
 
+// Generic (no player identity) baserunner helpers for defense — mirrors the
+// force-cascade logic used for our own offense, but returns run counts
+// instead of crediting a specific player.
+function placeDefenseRunner(bases, base) {
+  if (base >= 4) return { bases, scored: 1 };
+  if (bases[base]) {
+    const pushed = placeDefenseRunner(bases, base + 1);
+    return { bases: { ...pushed.bases, [base]: true }, scored: pushed.scored };
+  }
+  return { bases: { ...bases, [base]: true }, scored: 0 };
+}
+function moveDefenseRunner(bases, fromBase, toBase) {
+  const cleared = { ...bases, [fromBase]: false };
+  if (toBase >= 4) return { bases: cleared, scored: 1 };
+  return placeDefenseRunner(cleared, toBase);
+}
+
 const POSITIONS = ["P", "C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "EX"];
 
 function emptyPitchingState() {
@@ -65,6 +82,7 @@ function emptyGameState() {
     totalPitchingOuts: 0, // cumulative outs recorded while WE are on defense (doesn't reset each half)
     count: { balls: 0, strikes: 0 }, // current batter's live ball-strike count
     bases: { 1: null, 2: null, 3: null },
+    defenseBases: { 1: false, 2: false, 3: false }, // generic baserunners (no identity) while WE are on defense
     plays: [],
     scores: [],
     currentPlayId: null,
@@ -295,6 +313,7 @@ function Scorebook() {
   const [activeGame, setActiveGame] = useState(null);
   const [scorekeeper, setScorekeeper] = useState(false);
   const [selectedBase, setSelectedBase] = useState(null);
+  const [selectedDefenseBase, setSelectedDefenseBase] = useState(null);
 
   const refreshRoster = useCallback(async () => {
     const { data: t } = await supabase.from("teams").select("*").order("created_at", { ascending: true });
@@ -393,7 +412,7 @@ function Scorebook() {
   const flipHalf = (g) => {
     const half = g.half === "top" ? "bottom" : "top";
     const inning = g.half === "top" ? g.inning : g.inning + 1;
-    return { ...g, half, inning, outs: 0, bases: { 1: null, 2: null, 3: null }, currentPlayId: null, count: { balls: 0, strikes: 0 } };
+    return { ...g, half, inning, outs: 0, bases: { 1: null, 2: null, 3: null }, defenseBases: { 1: false, 2: false, 3: false }, currentPlayId: null, count: { balls: 0, strikes: 0 } };
   };
   const scoreRunner = (g, playerId, creditRbi) => {
     const scores = [...g.scores, { playerId, playId: g.currentPlayId, creditRbi }];
@@ -478,6 +497,60 @@ function Scorebook() {
     }
     persistGame(g);
   };
+
+  /* ---------- defense baserunners (no identity — just occupied/empty) ---------- */
+  const toggleDefenseBase = (n) => {
+    // Tapping an empty base places a runner there. Tapping an occupied base is
+    // handled by the parent opening the action menu instead of calling this.
+    if (!activeGame || activeGame.defenseBases[n]) return;
+    const { bases } = placeDefenseRunner(activeGame.defenseBases, n);
+    persistGame({ ...activeGame, defenseBases: bases });
+  };
+  const defenseBaseAction = (base, action) => {
+    if (!activeGame) return;
+    let g = { ...activeGame };
+    if (action === "advance") {
+      const { bases } = moveDefenseRunner(g.defenseBases, base, base + 1);
+      g = { ...g, defenseBases: bases };
+    } else if (action === "score-earned" || action === "score-unearned") {
+      g = { ...g, defenseBases: { ...g.defenseBases, [base]: false }, theirScore: g.theirScore + 1 };
+      if (action === "score-earned") g = { ...g, pitching: { ...g.pitching, ourEarnedRuns: g.pitching.ourEarnedRuns + 1 } };
+    } else if (action === "out") {
+      g = { ...g, defenseBases: { ...g.defenseBases, [base]: false }, outs: g.outs + 1, totalPitchingOuts: g.totalPitchingOuts + 1 };
+      if (g.outs >= 3) g = flipHalf(g);
+    }
+    setSelectedDefenseBase(null);
+    persistGame(g);
+  };
+  // Quick "their batter got a hit" buttons: advances every existing runner by
+  // the same number of bases as the hit (same rule as our own hitting), then
+  // places the new batter-runner. n=4 means a home run.
+  const recordDefenseHit = (n) => {
+    if (!activeGame) return;
+    let g = { ...activeGame };
+    let runsScored = 0;
+    if (n >= 4) {
+      runsScored = [1, 2, 3].filter((b) => g.defenseBases[b]).length + 1;
+      g = { ...g, defenseBases: { 1: false, 2: false, 3: false } };
+    } else {
+      let nb = { 1: false, 2: false, 3: false };
+      [3, 2, 1].forEach((from) => {
+        if (!g.defenseBases[from]) return;
+        const dest = from + n;
+        if (dest >= 4) runsScored += 1; else nb = { ...nb, [dest]: true };
+      });
+      nb = { ...nb, [n]: true };
+      g = { ...g, defenseBases: nb };
+    }
+    g = {
+      ...g,
+      theirScore: g.theirScore + runsScored,
+      pitching: runsScored > 0 ? { ...g.pitching, ourEarnedRuns: g.pitching.ourEarnedRuns + runsScored } : g.pitching,
+      count: { balls: 0, strikes: 0 },
+    };
+    persistGame(g);
+  };
+
   const skipHalf = () => activeGame && persistGame(flipHalf(activeGame));
   const undoLast = () => {
     if (!activeGame || activeGame.plays.length === 0) return;
@@ -546,8 +619,10 @@ function Scorebook() {
 
       if (type === "ball" && nextBalls >= 4) {
         if (side === "their") { recordOutcome("BB", newPitching); return; }
-        // side === 'our': opponent's batter walks — we don't track their lineup, just reset the count.
-        persistGame({ ...activeGame, pitching: newPitching, count: { balls: 0, strikes: 0 } });
+        // side === 'our': opponent's batter walks — place them on 1st (forcing
+        // anyone already there ahead), even though we don't track their lineup.
+        const { bases } = placeDefenseRunner(activeGame.defenseBases, 1);
+        persistGame({ ...activeGame, pitching: newPitching, count: { balls: 0, strikes: 0 }, defenseBases: bases });
         return;
       }
       if (type === "strike" && nextStrikes >= 3) {
@@ -692,6 +767,11 @@ function Scorebook() {
             skipHalf={skipHalf}
             undoLast={undoLast}
             endGame={endGame}
+            selectedDefenseBase={selectedDefenseBase}
+            setSelectedDefenseBase={setSelectedDefenseBase}
+            toggleDefenseBase={toggleDefenseBase}
+            defenseBaseAction={defenseBaseAction}
+            recordDefenseHit={recordDefenseHit}
             setPosition={setPosition}
             bumpFielding={bumpFielding}
             setOurPitcher={setOurPitcher}
@@ -1068,6 +1148,7 @@ function LiveGameView(props) {
   const {
     game, team, players, usBatting, scorekeeper, selectedBase,
     recordOutcome, tapBase, runnerAction, defenseOut, theirRun, skipHalf, undoLast, endGame,
+    selectedDefenseBase, setSelectedDefenseBase, toggleDefenseBase, defenseBaseAction, recordDefenseHit,
     setPosition, bumpFielding, setOurPitcher, setTheirPitcherName, bumpPitchAndCount,
     goHome,
   } = props;
@@ -1080,6 +1161,8 @@ function LiveGameView(props) {
   };
   const defensivePlayers = game.lineup.map((id) => players.find((p) => p.id === id)).filter(Boolean);
   const ourPitcher = players.find((p) => p.id === game.pitching.ourPitcherId);
+  const diamondBases = usBatting ? game.bases : game.defenseBases;
+  const diamondNames = usBatting ? baseNames : undefined;
 
   return (
     <div>
@@ -1090,7 +1173,7 @@ function LiveGameView(props) {
         <div>
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16 }}>
             <Card style={{ flex: "0 0 auto" }}>
-              <Diamond bases={game.bases} names={baseNames} />
+              <Diamond bases={diamondBases} names={diamondNames} />
               <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 10 }}>
                 <div style={{ textAlign: "center" }}>
                   <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>COUNT</div>
@@ -1186,6 +1269,43 @@ function LiveGameView(props) {
                   <Btn tone="dirt" onClick={() => theirRun(1, false)}>+1 Run (Unearned)</Btn>
                   <Btn tone="ghost" size="sm" onClick={() => theirRun(-1, false)}>-1 Run</Btn>
                   <Btn tone="ghost" size="sm" onClick={skipHalf}>Skip to Next Half-Inning</Btn>
+                </div>
+              </Card>
+
+              <Card style={{ marginBottom: 16 }}>
+                <Eyebrow>Their baserunners</Eyebrow>
+                <div style={{ fontSize: 12, color: C.chalkDim, marginBottom: 10 }}>No roster for the other team, so these are just tracked by base — tap an empty base when a runner reaches it.</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+                  {[1, 2, 3].map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => (game.defenseBases[n] ? setSelectedDefenseBase(n) : toggleDefenseBase(n))}
+                      style={{
+                        fontSize: 13, padding: "8px 14px", borderRadius: 14, border: `1px solid ${C.amber}`,
+                        background: game.defenseBases[n] ? C.amber : "transparent",
+                        color: game.defenseBases[n] ? C.ink : C.amber,
+                        fontWeight: 600, cursor: "pointer",
+                      }}
+                    >
+                      {n === 1 ? "1st" : n === 2 ? "2nd" : "3rd"}{game.defenseBases[n] ? " · runner" : ""}
+                    </button>
+                  ))}
+                </div>
+                {selectedDefenseBase != null && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, paddingTop: 8, borderTop: `1px solid ${C.line}22` }}>
+                    {selectedDefenseBase < 3 && <Btn size="sm" onClick={() => defenseBaseAction(selectedDefenseBase, "advance")}>Advance 1 Base</Btn>}
+                    <Btn size="sm" tone="amber" onClick={() => defenseBaseAction(selectedDefenseBase, "score-earned")}>Scores (Earned)</Btn>
+                    <Btn size="sm" tone="dirt" onClick={() => defenseBaseAction(selectedDefenseBase, "score-unearned")}>Scores (Unearned)</Btn>
+                    <Btn size="sm" tone="red" onClick={() => defenseBaseAction(selectedDefenseBase, "out")}>Out on Bases</Btn>
+                    <Btn size="sm" tone="ghost" onClick={() => setSelectedDefenseBase(null)}>Close</Btn>
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.line}22` }}>
+                  <span style={{ fontSize: 12, color: C.chalkDim, alignSelf: "center", marginRight: 4 }}>Their batter got a:</span>
+                  <Btn size="sm" tone="dirt" onClick={() => recordDefenseHit(1)}>Single</Btn>
+                  <Btn size="sm" tone="dirt" onClick={() => recordDefenseHit(2)}>Double</Btn>
+                  <Btn size="sm" tone="dirt" onClick={() => recordDefenseHit(3)}>Triple</Btn>
+                  <Btn size="sm" tone="amber" onClick={() => recordDefenseHit(4)}>Home Run</Btn>
                 </div>
               </Card>
 
