@@ -1181,7 +1181,7 @@ function LiveGameView(props) {
               <Card style={{ marginBottom: 16 }}>
                 <Eyebrow>On defense — {game.opponent} batting</Eyebrow>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  <Btn onClick={defenseOut} style={{ background: C.navy }}>Record Out</Btn>
+                  <Btn onClick={() => defenseOut()} style={{ background: C.navy }}>Record Out</Btn>
                   <Btn tone="amber" onClick={() => theirRun(1, true)}>+1 Run (Earned)</Btn>
                   <Btn tone="dirt" onClick={() => theirRun(1, false)}>+1 Run (Unearned)</Btn>
                   <Btn tone="ghost" size="sm" onClick={() => theirRun(-1, false)}>-1 Run</Btn>
