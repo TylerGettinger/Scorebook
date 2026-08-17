@@ -90,6 +90,7 @@ function emptyGameState() {
     defense: { positions: {} }, // playerId -> position code
     fielding: {}, // playerId -> { PO, A, E }
     pitching: emptyPitchingState(),
+    substitutions: [], // [{ inning, half, slotIndex, outPlayerId, inPlayerId, ts }]
   };
 }
 
@@ -578,6 +579,29 @@ function Scorebook() {
     persistGame({ ...activeGame, fielding: { ...activeGame.fielding, [playerId]: next } });
   };
 
+  /* ---------- substitutions ---------- */
+  const substitutePlayer = (slotIndex, newPlayerId) => {
+    if (!activeGame) return;
+    const outPlayerId = activeGame.lineup[slotIndex];
+    if (!outPlayerId || outPlayerId === newPlayerId) return;
+    const lineup = [...activeGame.lineup];
+    lineup[slotIndex] = newPlayerId;
+
+    // Carry over the outgoing player's defensive position, if they had one.
+    const positions = { ...activeGame.defense.positions };
+    if (positions[outPlayerId]) {
+      positions[newPlayerId] = positions[outPlayerId];
+      delete positions[outPlayerId];
+    }
+
+    const substitutions = [
+      ...activeGame.substitutions,
+      { inning: activeGame.inning, half: activeGame.half, slotIndex, outPlayerId, inPlayerId: newPlayerId, ts: Date.now() },
+    ];
+
+    persistGame({ ...activeGame, lineup, defense: { ...activeGame.defense, positions }, substitutions });
+  };
+
   /* ---------- pitching: balls / strikes / pitcher changes ---------- */
   const archiveCurrentStint = (g) => {
     const p = g.pitching;
@@ -774,6 +798,7 @@ function Scorebook() {
             recordDefenseHit={recordDefenseHit}
             setPosition={setPosition}
             bumpFielding={bumpFielding}
+            substitutePlayer={substitutePlayer}
             setOurPitcher={setOurPitcher}
             setTheirPitcherName={setTheirPitcherName}
             bumpPitchAndCount={bumpPitchAndCount}
@@ -1069,6 +1094,61 @@ function BattingPreview({ lineup, players, currentBatterIndex }) {
   );
 }
 
+/* ---------------- SUBSTITUTIONS ---------------- */
+function SubstitutionsPanel({ game, team, players, substitutePlayer }) {
+  const [open, setOpen] = useState(false);
+  const bench = team ? players.filter((p) => p.teamId === team.id && !game.lineup.includes(p.id)) : [];
+
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: open ? 12 : 0 }}>
+        <Eyebrow>Substitutions{game.substitutions.length > 0 ? ` (${game.substitutions.length})` : ""}</Eyebrow>
+        <Btn size="sm" tone="ghost" onClick={() => setOpen((o) => !o)}>{open ? "Close" : "Make a Sub"}</Btn>
+      </div>
+      {open && (
+        <>
+          {bench.length === 0 && <p style={{ color: C.chalkDim, fontSize: 13, margin: "0 0 10px" }}>No bench players available — everyone on the roster is already in the lineup.</p>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: game.substitutions.length > 0 ? 14 : 0 }}>
+            {game.lineup.map((pid, i) => {
+              const p = players.find((x) => x.id === pid);
+              return (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, width: 22 }}>{i + 1}.</span>
+                  <span style={{ color: C.chalk, fontSize: 13, minWidth: 110 }}>{p ? p.name : "—"}</span>
+                  {bench.length > 0 && (
+                    <select
+                      value=""
+                      onChange={(e) => { if (e.target.value) substitutePlayer(i, e.target.value); }}
+                      style={{ ...selStyle, width: "auto", flex: "1 1 160px", padding: "5px 8px", fontSize: 12 }}
+                    >
+                      <option value="">Sub in…</option>
+                      {bench.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                    </select>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {game.substitutions.length > 0 && (
+            <div style={{ borderTop: `1px solid ${C.line}22`, paddingTop: 10 }}>
+              <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1, marginBottom: 6 }}>SUBSTITUTION LOG</div>
+              {game.substitutions.map((s, i) => {
+                const inP = players.find((x) => x.id === s.inPlayerId);
+                const outP = players.find((x) => x.id === s.outPlayerId);
+                return (
+                  <div key={i} style={{ fontSize: 12, color: C.chalkDim, fontFamily: "IBM Plex Mono, monospace" }}>
+                    {s.half === "top" ? "T" : "B"}{s.inning} — {inP ? inP.name : "?"} in for {outP ? outP.name : "?"} (slot {s.slotIndex + 1})
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+
 /* ---------------- BALL-STRIKE COUNTER (shared by offense/defense) ---------------- */
 function PitchCounter({ title, pitcherControl, balls, strikes, onBall, onStrike, disabled }) {
   const pitches = balls + strikes;
@@ -1100,7 +1180,14 @@ function PitchCounter({ title, pitcherControl, balls, strikes, onBall, onStrike,
 
 /* ---------------- LIVE / FINAL BOX SCORE (shared) ---------------- */
 function BoxScoreTable({ lineup, players, plays, scores }) {
-  const rows = lineup.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: computeStatsFromPlays(p.id, plays, scores) }));
+  // Anyone who ever batted (via plays) should stay on the box score even if a
+  // substitution later moved them out of their lineup slot — otherwise their
+  // stats would silently vanish from the table.
+  const seen = new Set();
+  const order = [];
+  lineup.forEach((id) => { if (!seen.has(id)) { seen.add(id); order.push(id); } });
+  plays.forEach((p) => { if (!seen.has(p.playerId)) { seen.add(p.playerId); order.push(p.playerId); } });
+  const rows = order.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: computeStatsFromPlays(p.id, plays, scores) }));
   return (
     <div style={{ overflowX: "auto" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 13 }}>
@@ -1149,7 +1236,7 @@ function LiveGameView(props) {
     game, team, players, usBatting, scorekeeper, selectedBase,
     recordOutcome, tapBase, runnerAction, defenseOut, theirRun, skipHalf, undoLast, endGame,
     selectedDefenseBase, setSelectedDefenseBase, toggleDefenseBase, defenseBaseAction, recordDefenseHit,
-    setPosition, bumpFielding, setOurPitcher, setTheirPitcherName, bumpPitchAndCount,
+    setPosition, bumpFielding, substitutePlayer, setOurPitcher, setTheirPitcherName, bumpPitchAndCount,
     goHome,
   } = props;
   const batter = players.find((p) => p.id === game.lineup[game.currentBatterIndex % game.lineup.length]);
@@ -1354,6 +1441,10 @@ function LiveGameView(props) {
             </>
           )}
 
+          {scorekeeper && (
+            <SubstitutionsPanel game={game} team={team} players={players} substitutePlayer={substitutePlayer} />
+          )}
+
           <Eyebrow>Live box score — {team ? team.name : "Us"}</Eyebrow>
           <Card style={{ marginBottom: 16 }}>
             <BoxScoreTable lineup={game.lineup} players={players} plays={game.plays} scores={game.scores} />
@@ -1486,6 +1577,23 @@ function SummaryView({ game, team, players, scorekeeper, generating, generateRec
       <Card style={{ marginBottom: 16 }}>
         <BoxScoreTable lineup={game.lineup} players={players} plays={game.plays} scores={game.scores} />
       </Card>
+
+      {game.substitutions.length > 0 && (
+        <>
+          <Eyebrow>Substitutions</Eyebrow>
+          <Card style={{ marginBottom: 16 }}>
+            {game.substitutions.map((s, i) => {
+              const inP = players.find((x) => x.id === s.inPlayerId);
+              const outP = players.find((x) => x.id === s.outPlayerId);
+              return (
+                <div key={i} style={{ fontSize: 13, color: C.chalk, fontFamily: "IBM Plex Mono, monospace" }}>
+                  {s.half === "top" ? "T" : "B"}{s.inning} — {inP ? inP.name : "?"} in for {outP ? outP.name : "?"} (slot {s.slotIndex + 1})
+                </div>
+              );
+            })}
+          </Card>
+        </>
+      )}
 
       {(game.pitching.ourHistory.length > 0 || game.pitching.ourPitcherId || Object.keys(game.fielding).length > 0) && (
         <>
