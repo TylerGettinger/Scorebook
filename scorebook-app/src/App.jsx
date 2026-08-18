@@ -158,6 +158,31 @@ function computeStatsFromPlays(playerId, plays, scores) {
 const fmt3 = (n) => (n === 0 ? ".000" : n.toFixed(3).replace(/^0/, ""));
 const firstName = (full) => (full || "").trim().split(/\s+/)[0] || "";
 const ipDisplay = (outs) => `${Math.floor(outs / 3)}.${outs % 3}`;
+
+// Resizes an uploaded image down to a small square-ish logo and returns a
+// data URL, so team logos stay lightweight enough to store directly on the row.
+function resizeImageFile(file, maxDim = 200) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > height) { if (width > maxDim) { height = Math.round(height * (maxDim / width)); width = maxDim; } }
+        else { if (height > maxDim) { width = Math.round(width * (maxDim / height)); height = maxDim; } }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/png"));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+const TEAM_COLORS = ["#E8A33D", "#B3423A", "#2E6F9E", "#6B4FA0", "#2E8B7B", "#C0567F"];
 function pitchingLine(stints) {
   // stints: [{balls, strikes, outsRecorded, earnedRuns}]
   const balls = stints.reduce((a, s) => a + (s.balls || 0), 0);
@@ -319,7 +344,7 @@ function Scorebook() {
   const refreshRoster = useCallback(async () => {
     const { data: t } = await supabase.from("teams").select("*").order("created_at", { ascending: true });
     const { data: p } = await supabase.from("players").select("*").order("created_at", { ascending: true });
-    setTeams((t || []).map((r) => ({ id: r.id, name: r.name, createdAt: r.created_at })));
+    setTeams((t || []).map((r) => ({ id: r.id, name: r.name, createdAt: r.created_at, color: r.color || null, logo: r.logo_data || null })));
     setPlayers((p || []).map((r) => ({ id: r.id, teamId: r.team_id, name: r.name, number: r.number })));
   }, []);
 
@@ -381,9 +406,19 @@ function Scorebook() {
   const addTeam = async (name) => {
     const { data, error } = await supabase.from("teams").insert({ name }).select().single();
     if (error) return console.error(error);
-    setTeams((t) => [...t, { id: data.id, name: data.name, createdAt: data.created_at }]);
+    setTeams((t) => [...t, { id: data.id, name: data.name, createdAt: data.created_at, color: null, logo: null }]);
     setActiveTeamId(data.id);
     setView("team");
+  };
+  const updateTeamColor = async (teamId, color) => {
+    setTeams((t) => t.map((x) => (x.id === teamId ? { ...x, color } : x)));
+    const { error } = await supabase.from("teams").update({ color }).eq("id", teamId);
+    if (error) console.error(error);
+  };
+  const updateTeamLogo = async (teamId, logo) => {
+    setTeams((t) => t.map((x) => (x.id === teamId ? { ...x, logo } : x)));
+    const { error } = await supabase.from("teams").update({ logo_data: logo }).eq("id", teamId);
+    if (error) console.error(error);
   };
   const addPlayer = async (teamId, name, number) => {
     const { data, error } = await supabase.from("players").insert({ team_id: teamId, name, number }).select().single();
@@ -765,6 +800,8 @@ function Scorebook() {
             scorekeeper={scorekeeper}
             addPlayer={addPlayer}
             removePlayer={removePlayer}
+            updateTeamColor={updateTeamColor}
+            updateTeamLogo={updateTeamLogo}
             openGame={openGame}
             deleteGame={deleteGame}
             goNewGame={() => setView("newgame")}
@@ -879,6 +916,21 @@ function TopBar({ scorekeeper, setScorekeeper, setView }) {
   );
 }
 
+/* ---------------- TEAM BADGE (logo + color, reused across views) ---------------- */
+function TeamBadge({ team, size = 32 }) {
+  const color = (team && team.color) || C.amber;
+  if (team && team.logo) {
+    return <img src={team.logo} alt="" style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", border: `2px solid ${color}`, flexShrink: 0 }} />;
+  }
+  return (
+    <div style={{ width: size, height: size, borderRadius: "50%", background: color, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+      <span style={{ fontFamily: "Oswald, sans-serif", fontWeight: 700, fontSize: size * 0.42, color: C.ink }}>
+        {team && team.name ? team.name.trim()[0].toUpperCase() : "?"}
+      </span>
+    </div>
+  );
+}
+
 /* ---------------- HOME ---------------- */
 function HomeView({ teams, gameIndex, scorekeeper, addTeam, openTeam, openGame }) {
   const [newTeam, setNewTeam] = useState("");
@@ -916,9 +968,12 @@ function HomeView({ teams, gameIndex, scorekeeper, addTeam, openTeam, openGame }
           const tGames = gameIndex.filter((g) => g.teamId === t.id);
           return (
             <Card key={t.id} style={{ cursor: "pointer" }}>
-              <div onClick={() => openTeam(t.id)}>
-                <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 20, color: C.chalk, fontWeight: 600 }}>{t.name}</div>
-                <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 12, color: C.amber, marginTop: 4 }}>{tGames.length} game{tGames.length !== 1 ? "s" : ""} logged</div>
+              <div onClick={() => openTeam(t.id)} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <TeamBadge team={t} />
+                <div>
+                  <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 20, color: C.chalk, fontWeight: 600 }}>{t.name}</div>
+                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 12, color: C.amber, marginTop: 4 }}>{tGames.length} game{tGames.length !== 1 ? "s" : ""} logged</div>
+                </div>
               </div>
             </Card>
           );
@@ -939,18 +994,80 @@ function HomeView({ teams, gameIndex, scorekeeper, addTeam, openTeam, openGame }
 }
 
 /* ---------------- TEAM ---------------- */
-function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, openGame, deleteGame, goNewGame, goSeason, goHome }) {
+function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, updateTeamColor, updateTeamLogo, openGame, deleteGame, goNewGame, goSeason, goHome }) {
   const [name, setName] = useState("");
   const [num, setNum] = useState("");
+  const [uploading, setUploading] = useState(false);
   if (!team) return <div style={{ color: C.chalk }}>Team not found. <a onClick={goHome} style={{ color: C.amber, cursor: "pointer" }}>Go home</a></div>;
+
+  const onLogoFile = async (file) => {
+    if (!file) return;
+    if (file.size > 8 * 1024 * 1024) { alert("That image is too large — try one under 8MB."); return; }
+    setUploading(true);
+    try {
+      const dataUrl = await resizeImageFile(file, 200);
+      updateTeamLogo(team.id, dataUrl);
+    } catch (e) {
+      console.error(e);
+      alert("Couldn't process that image.");
+    }
+    setUploading(false);
+  };
+
   return (
     <div>
       <BackLink onClick={goHome}>All teams</BackLink>
-      <h1 style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 30, margin: "6px 0 16px" }}>{team.name}</h1>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "6px 0 16px" }}>
+        <TeamBadge team={team} size={44} />
+        <h1 style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 30, margin: 0 }}>{team.name}</h1>
+      </div>
       <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
         {scorekeeper && <Btn tone="amber" onClick={goNewGame}>+ Start New Game</Btn>}
         <Btn tone="ghost" onClick={goSeason}>View Season Stats</Btn>
       </div>
+
+      {scorekeeper && (
+        <>
+          <Eyebrow>Team colors & logo</Eyebrow>
+          <Card style={{ marginBottom: 20 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+              <TeamBadge team={team} size={56} />
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <label style={{ display: "inline-block" }}>
+                  <span style={{ ...selStyle, display: "inline-block", cursor: "pointer", width: "auto", padding: "8px 14px" }}>
+                    {uploading ? "Processing…" : "Upload Logo"}
+                  </span>
+                  <input type="file" accept="image/*" onChange={(e) => onLogoFile(e.target.files[0])} style={{ display: "none" }} disabled={uploading} />
+                </label>
+                {team.logo && <Btn size="sm" tone="ghost" onClick={() => updateTeamLogo(team.id, null)}>Remove Logo</Btn>}
+              </div>
+            </div>
+            <div style={{ marginTop: 14 }}>
+              <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 11, letterSpacing: 1, color: C.chalkDim, marginBottom: 8, textTransform: "uppercase" }}>Team color</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                {TEAM_COLORS.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => updateTeamColor(team.id, c)}
+                    style={{
+                      width: 28, height: 28, borderRadius: "50%", background: c, cursor: "pointer",
+                      border: team.color === c ? `3px solid ${C.chalk}` : "2px solid transparent",
+                    }}
+                  />
+                ))}
+                <input
+                  type="color"
+                  value={team.color || "#E8A33D"}
+                  onChange={(e) => updateTeamColor(team.id, e.target.value)}
+                  style={{ width: 34, height: 28, padding: 0, border: `1px solid ${C.line}`, borderRadius: 6, background: "none", cursor: "pointer" }}
+                  title="Custom color"
+                />
+              </div>
+            </div>
+          </Card>
+        </>
+      )}
+
       <Eyebrow>Roster ({players.length})</Eyebrow>
       <Card style={{ marginBottom: 20 }}>
         {players.length === 0 && <p style={{ color: C.chalkDim, margin: 0 }}>No players yet.</p>}
@@ -1476,11 +1593,11 @@ function LiveGameView(props) {
 }
 const miniBtn = { background: "none", border: `1px solid ${C.line}`, color: C.chalkDim, borderRadius: 4, width: 18, height: 18, cursor: "pointer", fontSize: 12, lineHeight: 1, padding: 0 };
 
-function BatIcon() {
+function BatIcon({ color }) {
   return (
     <svg width="20" height="20" viewBox="0 0 24 24" style={{ flexShrink: 0 }}>
       <g transform="rotate(-40 12 12)">
-        <rect x="10.5" y="2" width="3" height="12" rx="1.5" fill={C.amber} />
+        <rect x="10.5" y="2" width="3" height="12" rx="1.5" fill={color || C.amber} />
         <rect x="10" y="13" width="4" height="9" rx="2" fill={C.dirt} />
       </g>
     </svg>
@@ -1491,12 +1608,13 @@ function BatIcon() {
 function ScoreHeader({ game, team }) {
   const ourName = team ? team.name : "Us";
   const usBatting = game.isHome ? game.half === "bottom" : game.half === "top";
+  const accent = (team && team.color) || C.amber;
   return (
     <Card style={{ marginBottom: 16, background: C.navy, border: "none" }}>
       <div
         style={{
           display: "inline-block",
-          background: C.amber,
+          background: accent,
           color: C.ink,
           borderRadius: 8,
           padding: "6px 16px",
@@ -1510,10 +1628,11 @@ function ScoreHeader({ game, team }) {
         {game.half === "top" ? "▲ TOP" : "▼ BOT"} {game.inning}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {[{ name: ourName, score: game.ourScore, batting: usBatting }, { name: game.opponent, score: game.theirScore, batting: !usBatting }].map((row, i) => (
+        {[{ name: ourName, score: game.ourScore, batting: usBatting, us: true }, { name: game.opponent, score: game.theirScore, batting: !usBatting, us: false }].map((row, i) => (
           <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
-              {row.batting && <BatIcon />}
+              {row.us && <TeamBadge team={team} size={26} />}
+              {row.batting && <BatIcon color={row.us ? accent : undefined} />}
               <div style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 20, fontWeight: 500, minWidth: 0, wordBreak: "break-word", lineHeight: 1.2 }}>
                 {row.name}
               </div>
