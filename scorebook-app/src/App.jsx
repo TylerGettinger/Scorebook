@@ -157,6 +157,21 @@ function computeStatsFromPlays(playerId, plays, scores) {
 }
 const fmt3 = (n) => (n === 0 ? ".000" : n.toFixed(3).replace(/^0/, ""));
 const firstName = (full) => (full || "").trim().split(/\s+/)[0] || "";
+function teamRecord(teamId, gameIndex) {
+  const finals = gameIndex.filter((g) => g.teamId === teamId && g.status === "final");
+  const w = finals.filter((g) => g.ourScore > g.theirScore).length;
+  const l = finals.filter((g) => g.ourScore < g.theirScore).length;
+  const t = finals.filter((g) => g.ourScore === g.theirScore).length;
+  return { w, l, t, played: finals.length };
+}
+function RecordBadge({ record, size = 12 }) {
+  if (record.played === 0) return null;
+  return (
+    <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: size, color: C.chalkDim }}>
+      {record.w}-{record.l}{record.t > 0 ? `-${record.t}` : ""}
+    </span>
+  );
+}
 const ipDisplay = (outs) => `${Math.floor(outs / 3)}.${outs % 3}`;
 
 // Resizes an uploaded image down to a small square-ish logo and returns a
@@ -974,13 +989,18 @@ function HomeView({ teams, gameIndex, scorekeeper, addTeam, openTeam, openGame }
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, marginBottom: 20 }}>
         {teams.map((t) => {
           const tGames = gameIndex.filter((g) => g.teamId === t.id);
+          const record = teamRecord(t.id, gameIndex);
           return (
             <Card key={t.id} style={{ cursor: "pointer" }}>
               <div onClick={() => openTeam(t.id)} style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <TeamBadge team={t} />
                 <div>
                   <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 20, color: C.chalk, fontWeight: 600 }}>{t.name}</div>
-                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 12, color: C.amber, marginTop: 4 }}>{tGames.length} game{tGames.length !== 1 ? "s" : ""} logged</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
+                    <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 12, color: C.amber }}>{tGames.length} game{tGames.length !== 1 ? "s" : ""} logged</span>
+                    {record.played > 0 && <span style={{ color: C.chalkDim, fontSize: 11 }}>·</span>}
+                    <RecordBadge record={record} />
+                  </div>
                 </div>
               </div>
             </Card>
@@ -1025,9 +1045,14 @@ function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, 
   return (
     <div>
       <BackLink onClick={goHome}>All teams</BackLink>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "6px 0 16px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "6px 0 16px", flexWrap: "wrap" }}>
         <TeamBadge team={team} size={44} />
         <h1 style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 30, margin: 0 }}>{team.name}</h1>
+        {teamRecord(team.id, games).played > 0 && (
+          <span style={{ background: `${C.amber}22`, border: `1px solid ${C.amber}55`, borderRadius: 20, padding: "4px 12px" }}>
+            <RecordBadge record={teamRecord(team.id, games)} size={14} />
+          </span>
+        )}
       </div>
       <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
         {scorekeeper && <Btn tone="amber" onClick={goNewGame}>+ Start New Game</Btn>}
