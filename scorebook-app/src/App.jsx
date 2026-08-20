@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./lib/supabaseClient.js";
 
 /* ---------------------------------------------------------
@@ -340,6 +340,7 @@ function Scorebook() {
   const [scorekeeper, setScorekeeper] = useState(false);
   const [selectedBase, setSelectedBase] = useState(null);
   const [selectedDefenseBase, setSelectedDefenseBase] = useState(null);
+  const [history, setHistory] = useState([]); // client-side undo stack (full game snapshots), not persisted
 
   const refreshRoster = useCallback(async () => {
     const { data: t } = await supabase.from("teams").select("*").order("created_at", { ascending: true });
@@ -371,16 +372,31 @@ function Scorebook() {
   }, [refreshRoster, refreshGameIndex]);
 
   const persistGame = useCallback(async (g) => {
-    setActiveGame(g);
+    setActiveGame((prev) => {
+      if (prev && prev.id === g.id) setHistory((h) => [...h.slice(-14), prev]);
+      return g;
+    });
     const { error } = await supabase.from("games").update(gameToRow(g)).eq("id", g.id);
     if (error) console.error("game update failed", error);
     setGameIndex((idx) => idx.map((e) => (e.id === g.id ? { ...e, status: g.status, ourScore: g.ourScore, theirScore: g.theirScore, opponent: g.opponent, date: g.date } : e)));
+  }, []);
+
+  const undoLastAction = useCallback(() => {
+    setHistory((h) => {
+      if (h.length === 0) return h;
+      const prev = h[h.length - 1];
+      setActiveGame(prev);
+      supabase.from("games").update(gameToRow(prev)).eq("id", prev.id).then(({ error }) => { if (error) console.error("undo failed", error); });
+      setGameIndex((idx) => idx.map((e) => (e.id === prev.id ? { ...e, status: prev.status, ourScore: prev.ourScore, theirScore: prev.theirScore } : e)));
+      return h.slice(0, -1);
+    });
   }, []);
 
   const openGame = useCallback(async (id) => {
     const { data, error } = await supabase.from("games").select("*").eq("id", id).single();
     if (error || !data) return;
     setActiveGame(rowToGame(data));
+    setHistory([]);
     setView(data.status === "final" ? "summary" : "live");
   }, []);
 
@@ -439,6 +455,7 @@ function Scorebook() {
     if (error) return console.error(error);
     const full = rowToGame(data);
     setActiveGame(full);
+    setHistory([]);
     setGameIndex((idx) => [{ id: full.id, teamId, opponent, date, status: "live", ourScore: 0, theirScore: 0 }, ...idx]);
     setView("live");
   };
@@ -588,17 +605,6 @@ function Scorebook() {
   };
 
   const skipHalf = () => activeGame && persistGame(flipHalf(activeGame));
-  const undoLast = () => {
-    if (!activeGame || activeGame.plays.length === 0) return;
-    const last = activeGame.plays[activeGame.plays.length - 1];
-    const o = outcomeByKey(last.outcome);
-    persistGame({
-      ...activeGame,
-      plays: activeGame.plays.slice(0, -1),
-      currentBatterIndex: Math.max(0, activeGame.currentBatterIndex - 1),
-      outs: o.out ? Math.max(0, activeGame.outs - 1) : activeGame.outs,
-    });
-  };
 
   /* ---------- defense: positions + fielding ---------- */
   const setPosition = (playerId, pos) => {
@@ -710,6 +716,7 @@ function Scorebook() {
   const reopenGame = () => {
     if (!activeGame) return;
     persistGame({ ...activeGame, status: "live" });
+    setHistory([]);
     setView("live");
   };
   const updateGameMeta = (patch) => {
@@ -826,7 +833,8 @@ function Scorebook() {
             defenseOut={defenseOut}
             theirRun={theirRun}
             skipHalf={skipHalf}
-            undoLast={undoLast}
+            undoLastAction={undoLastAction}
+            canUndo={history.length > 0}
             endGame={endGame}
             selectedDefenseBase={selectedDefenseBase}
             setSelectedDefenseBase={setSelectedDefenseBase}
@@ -1267,7 +1275,7 @@ function SubstitutionsPanel({ game, team, players, substitutePlayer }) {
 }
 
 /* ---------------- BALL-STRIKE COUNTER (shared by offense/defense) ---------------- */
-function PitchCounter({ title, pitcherControl, balls, strikes, onBall, onStrike, disabled }) {
+function PitchCounter({ title, pitcherControl, balls, strikes, onBall, onStrike, disabled, onUndo, canUndo }) {
   const pitches = balls + strikes;
   const pct = pitches > 0 ? Math.round((strikes / pitches) * 100) : 0;
   return (
@@ -1291,6 +1299,11 @@ function PitchCounter({ title, pitcherControl, balls, strikes, onBall, onStrike,
           <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 18, color: C.amber, fontWeight: 700 }}>{pitches} · {pct}%</div>
         </div>
       </div>
+      {onUndo && (
+        <div style={{ marginTop: 12 }}>
+          <Btn size="sm" tone="ghost" onClick={onUndo} disabled={!canUndo}>Undo Last Pitch</Btn>
+        </div>
+      )}
     </Card>
   );
 }
@@ -1351,7 +1364,7 @@ function PitchingLineDisplay({ game, players }) {
 function LiveGameView(props) {
   const {
     game, team, players, usBatting, scorekeeper, selectedBase,
-    recordOutcome, tapBase, runnerAction, defenseOut, theirRun, skipHalf, undoLast, endGame,
+    recordOutcome, tapBase, runnerAction, defenseOut, theirRun, skipHalf, undoLastAction, canUndo, endGame,
     selectedDefenseBase, setSelectedDefenseBase, toggleDefenseBase, defenseBaseAction, recordDefenseHit,
     setPosition, bumpFielding, substitutePlayer, setOurPitcher, setTheirPitcherName, bumpPitchAndCount,
     goHome,
@@ -1439,7 +1452,7 @@ function LiveGameView(props) {
                 ))}
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
-                <Btn tone="ghost" size="sm" onClick={undoLast} disabled={game.plays.length === 0}>Undo Last Play</Btn>
+                <Btn tone="ghost" size="sm" onClick={undoLastAction} disabled={!canUndo}>Undo Last Play</Btn>
                 <Btn tone="ghost" size="sm" onClick={skipHalf}>Skip to Next Half-Inning</Btn>
               </div>
             </Card>
@@ -1460,6 +1473,8 @@ function LiveGameView(props) {
               strikes={game.pitching.theirStrikes}
               onBall={() => bumpPitchAndCount("their", "ball", 1)}
               onStrike={() => bumpPitchAndCount("their", "strike", 1)}
+              onUndo={undoLastAction}
+              canUndo={canUndo}
             />
           )}
 
@@ -1473,6 +1488,7 @@ function LiveGameView(props) {
                   <Btn tone="dirt" onClick={() => theirRun(1, false)}>+1 Run (Unearned)</Btn>
                   <Btn tone="ghost" size="sm" onClick={() => theirRun(-1, false)}>-1 Run</Btn>
                   <Btn tone="ghost" size="sm" onClick={skipHalf}>Skip to Next Half-Inning</Btn>
+                  <Btn tone="ghost" size="sm" onClick={undoLastAction} disabled={!canUndo}>Undo Last Play</Btn>
                 </div>
               </Card>
 
@@ -1529,6 +1545,8 @@ function LiveGameView(props) {
                 onBall={() => bumpPitchAndCount("our", "ball", 1)}
                 onStrike={() => bumpPitchAndCount("our", "strike", 1)}
                 disabled={!game.pitching.ourPitcherId}
+                onUndo={undoLastAction}
+                canUndo={canUndo}
               />
 
               <Card style={{ marginBottom: 16 }}>
@@ -1607,15 +1625,16 @@ function BatIcon({ color }) {
 /* ---------------- BIG-PRINT SCOREBOARD ---------------- */
 function ScoreHeader({ game, team }) {
   const ourName = team ? team.name : "Us";
-  const usBatting = game.isHome ? game.half === "bottom" : game.half === "top";
+  const isFinal = game.status === "final";
+  const usBatting = !isFinal && (game.isHome ? game.half === "bottom" : game.half === "top");
   const accent = (team && team.color) || C.amber;
   return (
     <Card style={{ marginBottom: 16, background: C.navy, border: "none" }}>
       <div
         style={{
           display: "inline-block",
-          background: accent,
-          color: C.ink,
+          background: isFinal ? C.red : accent,
+          color: isFinal ? C.chalk : C.ink,
           borderRadius: 8,
           padding: "6px 16px",
           fontFamily: "Oswald, sans-serif",
@@ -1625,7 +1644,7 @@ function ScoreHeader({ game, team }) {
           marginBottom: 14,
         }}
       >
-        {game.half === "top" ? "▲ TOP" : "▼ BOT"} {game.inning}
+        {isFinal ? "FINAL" : `${game.half === "top" ? "▲ TOP" : "▼ BOT"} ${game.inning}`}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {[{ name: ourName, score: game.ourScore, batting: usBatting, us: true }, { name: game.opponent, score: game.theirScore, batting: !usBatting, us: false }].map((row, i) => (
