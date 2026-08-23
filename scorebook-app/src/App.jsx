@@ -74,6 +74,8 @@ function emptyPitchingState() {
 }
 function emptyGameState() {
   return {
+    source: "live", // 'live' (tracked play-by-play in this app) or 'manual' (old game, entered as a final box score)
+    manualStats: {}, // playerId -> { AB, R, H, 2B, 3B, HR, RBI, BB, HBP, K, SF } — used only when source === 'manual'
     lineup: [],
     currentBatterIndex: 0,
     inning: 1,
@@ -149,12 +151,38 @@ function computeStatsFromPlays(playerId, plays, scores) {
   for (const sc of scores || []) {
     if (sc.playerId === playerId) s.R += 1;
   }
-  const totalBases = s.H - s["2B"] - s["3B"] - s.HR + s["2B"] * 2 + s["3B"] * 3 + s.HR * 4;
-  s.AVG = s.AB > 0 ? s.H / s.AB : 0;
-  s.OBP = s.AB + s.BB + s.HBP + s.SF > 0 ? (s.H + s.BB + s.HBP) / (s.AB + s.BB + s.HBP + s.SF) : 0;
-  s.SLG = s.AB > 0 ? totalBases / s.AB : 0;
-  return s;
+  return withRates(s);
 }
+function withRates(s) {
+  const totalBases = s.H - s["2B"] - s["3B"] - s.HR + s["2B"] * 2 + s["3B"] * 3 + s.HR * 4;
+  return {
+    ...s,
+    AVG: s.AB > 0 ? s.H / s.AB : 0,
+    OBP: s.AB + s.BB + s.HBP + s.SF > 0 ? (s.H + s.BB + s.HBP) / (s.AB + s.BB + s.HBP + s.SF) : 0,
+    SLG: s.AB > 0 ? totalBases / s.AB : 0,
+  };
+}
+// Works for both a live-tracked game (computed from individual plays) and a
+// manually-entered old game (computed from a stored final stat line), so
+// season totals and box scores can treat every game the same way.
+function statsForPlayerInGame(game, playerId) {
+  if (game.source === "manual") {
+    const raw = (game.manualStats && game.manualStats[playerId]) || {};
+    const s = { AB: 0, R: 0, H: 0, "2B": 0, "3B": 0, HR: 0, RBI: 0, BB: 0, HBP: 0, K: 0, SF: 0, ...raw };
+    s.PA = s.AB + s.BB + s.HBP + s.SF;
+    return withRates(s);
+  }
+  return computeStatsFromPlays(playerId, game.plays, game.scores);
+}
+function aggregateSeasonStats(playerId, games) {
+  const totals = { PA: 0, AB: 0, R: 0, H: 0, "2B": 0, "3B": 0, HR: 0, RBI: 0, BB: 0, HBP: 0, K: 0, SF: 0 };
+  games.forEach((g) => {
+    const s = statsForPlayerInGame(g, playerId);
+    Object.keys(totals).forEach((k) => { totals[k] += s[k] || 0; });
+  });
+  return withRates(totals);
+}
+
 const fmt3 = (n) => (n === 0 ? ".000" : n.toFixed(3).replace(/^0/, ""));
 const firstName = (full) => (full || "").trim().split(/\s+/)[0] || "";
 function teamRecord(teamId, gameIndex) {
@@ -367,10 +395,10 @@ function Scorebook() {
   const refreshGameIndex = useCallback(async () => {
     const { data } = await supabase
       .from("games")
-      .select("id, team_id, opponent, date, status, our_score, their_score")
+      .select("id, team_id, opponent, date, status, our_score, their_score, source:state->>source")
       .order("created_at", { ascending: false });
     setGameIndex(
-      (data || []).map((r) => ({ id: r.id, teamId: r.team_id, opponent: r.opponent, date: r.date, status: r.status, ourScore: r.our_score, theirScore: r.their_score }))
+      (data || []).map((r) => ({ id: r.id, teamId: r.team_id, opponent: r.opponent, date: r.date, status: r.status, ourScore: r.our_score, theirScore: r.their_score, source: r.source || "live" }))
     );
   }, []);
 
@@ -471,9 +499,29 @@ function Scorebook() {
     const full = rowToGame(data);
     setActiveGame(full);
     setHistory([]);
-    setGameIndex((idx) => [{ id: full.id, teamId, opponent, date, status: "live", ourScore: 0, theirScore: 0 }, ...idx]);
+    setGameIndex((idx) => [{ id: full.id, teamId, opponent, date, status: "live", ourScore: 0, theirScore: 0, source: "live" }, ...idx]);
     setView("live");
   };
+
+  // Old games entered as a final box score (no play-by-play). If activeGame is
+  // already a manual game, this edits it in place; otherwise it creates a new one.
+  const saveOldGame = async (payload) => {
+    if (activeGame && activeGame.source === "manual") {
+      persistGame({ ...activeGame, ...payload });
+      setView("summary");
+      return;
+    }
+    const g = { id: undefined, teamId: activeTeamId, isHome: true, status: "final", ...emptyGameState(), source: "manual", ...payload };
+    const row = gameToRow(g);
+    delete row.id;
+    const { data, error } = await supabase.from("games").insert(row).select().single();
+    if (error) return console.error(error);
+    const full = rowToGame(data);
+    setActiveGame(full);
+    setGameIndex((idx) => [{ id: full.id, teamId: full.teamId, opponent: full.opponent, date: full.date, status: "final", ourScore: full.ourScore, theirScore: full.theirScore, source: "manual" }, ...idx]);
+    setView("summary");
+  };
+  const goAddOldGame = () => { setActiveGame(null); setView("oldgame"); };
 
   const usBatting = activeGame ? (activeGame.isHome ? activeGame.half === "bottom" : activeGame.half === "top") : false;
 
@@ -752,7 +800,7 @@ function Scorebook() {
         .map((pid) => players.find((p) => p.id === pid))
         .filter(Boolean)
         .map((p) => {
-          const s = computeStatsFromPlays(p.id, activeGame.plays, activeGame.scores);
+          const s = statsForPlayerInGame(activeGame, p.id);
           return `${p.name}: ${s.AB} AB, ${s.H} H, ${s.R} R, ${s.RBI} RBI, ${s.BB} BB, ${s.K} K`;
         })
         .join("\n");
@@ -827,12 +875,22 @@ function Scorebook() {
             openGame={openGame}
             deleteGame={deleteGame}
             goNewGame={() => setView("newgame")}
+            goAddOldGame={goAddOldGame}
             goSeason={() => setView("season")}
             goHome={() => setView("home")}
           />
         )}
         {view === "newgame" && (
           <NewGameView teams={teams} players={players} defaultTeamId={activeTeamId} onCancel={() => setView("team")} onStart={startGame} />
+        )}
+        {view === "oldgame" && (
+          <OldGameView
+            team={teams.find((t) => t.id === (activeGame ? activeGame.teamId : activeTeamId))}
+            players={players}
+            existingGame={activeGame && activeGame.source === "manual" ? activeGame : null}
+            onCancel={() => setView(activeGame && activeGame.source === "manual" ? "summary" : "team")}
+            onSave={saveOldGame}
+          />
         )}
         {view === "live" && activeGame && (
           <LiveGameView
@@ -876,6 +934,7 @@ function Scorebook() {
             updateReport={(text) => persistGame({ ...activeGame, report: text })}
             updateGameMeta={updateGameMeta}
             reopenGame={reopenGame}
+            goEditOldGame={() => setView("oldgame")}
             deleteGame={async (id) => { await deleteGame(id); setView("home"); }}
             goHome={() => setView("home")}
           />
@@ -1022,7 +1081,7 @@ function HomeView({ teams, gameIndex, scorekeeper, addTeam, openTeam, openGame }
 }
 
 /* ---------------- TEAM ---------------- */
-function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, updateTeamColor, updateTeamLogo, openGame, deleteGame, goNewGame, goSeason, goHome }) {
+function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, updateTeamColor, updateTeamLogo, openGame, deleteGame, goNewGame, goAddOldGame, goSeason, goHome }) {
   const [name, setName] = useState("");
   const [num, setNum] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -1056,6 +1115,7 @@ function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, 
       </div>
       <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
         {scorekeeper && <Btn tone="amber" onClick={goNewGame}>+ Start New Game</Btn>}
+        {scorekeeper && <Btn tone="ghost" onClick={goAddOldGame}>+ Add Old Game</Btn>}
         <Btn tone="ghost" onClick={goSeason}>View Season Stats</Btn>
       </div>
 
@@ -1124,7 +1184,10 @@ function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, 
         {games.map((g) => (
           <div key={g.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${C.line}22`, gap: 10 }}>
             <div onClick={() => openGame(g.id)} style={{ cursor: "pointer", flex: 1 }}>
-              <div style={{ color: C.chalk, fontFamily: "Oswald, sans-serif", fontWeight: 500 }}>vs {g.opponent}</div>
+              <div style={{ color: C.chalk, fontFamily: "Oswald, sans-serif", fontWeight: 500 }}>
+                vs {g.opponent}
+                {g.source === "manual" && <span style={{ fontSize: 10, color: C.chalkDim, fontFamily: "IBM Plex Mono, monospace", marginLeft: 8, border: `1px solid ${C.line}`, borderRadius: 8, padding: "1px 6px" }}>MANUAL</span>}
+              </div>
               <div style={{ color: C.chalkDim, fontSize: 12, fontFamily: "IBM Plex Mono, monospace" }}>{g.date}</div>
             </div>
             <div onClick={() => openGame(g.id)} style={{ cursor: "pointer", textAlign: "right" }}>
@@ -1202,6 +1265,109 @@ function NewGameView({ teams, players, defaultTeamId, onCancel, onStart }) {
         })}
       </Card>
       <Btn tone="amber" size="lg" disabled={!teamId || !opponent.trim() || lineup.length === 0} onClick={() => onStart({ teamId, opponent: opponent.trim(), date, isHome, lineup })}>Start Game</Btn>
+    </div>
+  );
+}
+
+/* ---------------- OLD GAME (manual box-score entry) ---------------- */
+const MANUAL_STAT_FIELDS = ["AB", "R", "H", "2B", "3B", "HR", "RBI", "BB", "HBP", "K", "SF"];
+function OldGameView({ team, players, existingGame, onCancel, onSave }) {
+  const isEdit = !!existingGame;
+  const teamPlayers = team ? players.filter((p) => p.teamId === team.id) : [];
+  const [opponent, setOpponent] = useState(existingGame ? existingGame.opponent : "");
+  const [date, setDate] = useState(existingGame ? existingGame.date : new Date().toISOString().slice(0, 10));
+  const [ourScore, setOurScore] = useState(existingGame ? existingGame.ourScore : 0);
+  const [theirScore, setTheirScore] = useState(existingGame ? existingGame.theirScore : 0);
+  const [selected, setSelected] = useState(existingGame ? existingGame.lineup : []);
+  const [stats, setStats] = useState(existingGame ? existingGame.manualStats : {});
+
+  if (!team) return <div style={{ color: C.chalk }}>Team not found. <a onClick={onCancel} style={{ color: C.amber, cursor: "pointer" }}>Go back</a></div>;
+
+  const toggle = (id) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+  const setStat = (pid, field, value) => {
+    const n = Math.max(0, parseInt(value, 10) || 0);
+    setStats((s) => ({ ...s, [pid]: { ...(s[pid] || {}), [field]: n } }));
+  };
+
+  const save = () => {
+    const cleanStats = {};
+    selected.forEach((pid) => {
+      const row = stats[pid] || {};
+      const clean = {};
+      MANUAL_STAT_FIELDS.forEach((f) => { clean[f] = row[f] || 0; });
+      cleanStats[pid] = clean;
+    });
+    onSave({ opponent: opponent.trim(), date, ourScore: Number(ourScore) || 0, theirScore: Number(theirScore) || 0, lineup: selected, manualStats: cleanStats });
+  };
+
+  return (
+    <div>
+      <BackLink onClick={onCancel}>Cancel</BackLink>
+      <h1 style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 30, margin: "6px 0 16px" }}>{isEdit ? "Edit Old Game" : "Add Old Game"}</h1>
+      <p style={{ color: C.chalkDim, fontSize: 13, marginTop: -10, marginBottom: 16, maxWidth: 560 }}>
+        For a game you didn't track live in Scorebook — enter the final score and each player's stat line. It's saved as a finished game and folds right into season stats alongside your live-tracked games.
+      </p>
+
+      <Card style={{ marginBottom: 16 }}>
+        <Field label="Opponent"><input value={opponent} onChange={(e) => setOpponent(e.target.value)} placeholder="Opponent team name" style={selStyle} /></Field>
+        <Field label="Date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={selStyle} /></Field>
+        <div style={{ display: "flex", gap: 10 }}>
+          <Field label="Our score"><input type="number" value={ourScore} onChange={(e) => setOurScore(e.target.value)} style={selStyle} /></Field>
+          <Field label="Their score"><input type="number" value={theirScore} onChange={(e) => setTheirScore(e.target.value)} style={selStyle} /></Field>
+        </div>
+      </Card>
+
+      <Eyebrow>Players in this game — tap to include, then fill in their line</Eyebrow>
+      <Card style={{ marginBottom: 16 }}>
+        {teamPlayers.length === 0 && <p style={{ color: C.chalkDim }}>Add players to this team's roster first.</p>}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: selected.length ? 14 : 0 }}>
+          {teamPlayers.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => toggle(p.id)}
+              style={{ padding: "8px 12px", borderRadius: 8, border: `1px solid ${selected.includes(p.id) ? C.amber : C.line}`, background: selected.includes(p.id) ? C.amber : "transparent", color: selected.includes(p.id) ? C.ink : C.chalk, fontWeight: 600, cursor: "pointer" }}
+            >
+              #{p.number || "—"} {p.name}
+            </button>
+          ))}
+        </div>
+        {selected.length > 0 && (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 12, minWidth: 640 }}>
+              <thead>
+                <tr style={{ color: C.amber, textAlign: "left" }}>
+                  <th style={{ padding: "4px 8px", position: "sticky", left: 0, background: C.greenLight }}>Player</th>
+                  {MANUAL_STAT_FIELDS.map((f) => <th key={f} style={{ padding: "4px 6px", textAlign: "center" }}>{f}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {selected.map((pid) => {
+                  const p = teamPlayers.find((x) => x.id === pid);
+                  const row = stats[pid] || {};
+                  return (
+                    <tr key={pid}>
+                      <td style={{ padding: "4px 8px", color: C.chalk, position: "sticky", left: 0, background: C.greenLight, whiteSpace: "nowrap" }}>{p ? p.name : "—"}</td>
+                      {MANUAL_STAT_FIELDS.map((f) => (
+                        <td key={f} style={{ padding: "3px" }}>
+                          <input
+                            type="number"
+                            min="0"
+                            value={row[f] || 0}
+                            onChange={(e) => setStat(pid, f, e.target.value)}
+                            style={{ width: 44, padding: "5px 4px", borderRadius: 6, border: `1px solid ${C.line}`, background: C.chalk, color: C.ink, textAlign: "center" }}
+                          />
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      <Btn tone="amber" size="lg" disabled={!opponent.trim() || selected.length === 0} onClick={save}>{isEdit ? "Save Changes" : "Add Game"}</Btn>
     </div>
   );
 }
@@ -1334,15 +1500,16 @@ function PitchCounter({ title, pitcherControl, balls, strikes, onBall, onStrike,
 }
 
 /* ---------------- LIVE / FINAL BOX SCORE (shared) ---------------- */
-function BoxScoreTable({ lineup, players, plays, scores }) {
-  // Anyone who ever batted (via plays) should stay on the box score even if a
-  // substitution later moved them out of their lineup slot — otherwise their
-  // stats would silently vanish from the table.
+function BoxScoreTable({ game, players }) {
+  // Anyone who ever batted (via plays, or has a manual stat line) should stay
+  // on the box score even if a substitution later moved them out of their
+  // lineup slot — otherwise their stats would silently vanish from the table.
   const seen = new Set();
   const order = [];
-  lineup.forEach((id) => { if (!seen.has(id)) { seen.add(id); order.push(id); } });
-  plays.forEach((p) => { if (!seen.has(p.playerId)) { seen.add(p.playerId); order.push(p.playerId); } });
-  const rows = order.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: computeStatsFromPlays(p.id, plays, scores) }));
+  (game.lineup || []).forEach((id) => { if (!seen.has(id)) { seen.add(id); order.push(id); } });
+  (game.plays || []).forEach((p) => { if (!seen.has(p.playerId)) { seen.add(p.playerId); order.push(p.playerId); } });
+  Object.keys(game.manualStats || {}).forEach((id) => { if (!seen.has(id)) { seen.add(id); order.push(id); } });
+  const rows = order.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: statsForPlayerInGame(game, p.id) }));
   return (
     <div style={{ overflowX: "auto" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 13 }}>
@@ -1607,7 +1774,7 @@ function LiveGameView(props) {
 
           <Eyebrow>Live box score — {team ? team.name : "Us"}</Eyebrow>
           <Card style={{ marginBottom: 16 }}>
-            <BoxScoreTable lineup={game.lineup} players={players} plays={game.plays} scores={game.scores} />
+            <BoxScoreTable game={game} players={players} />
             <PitchingLineDisplay game={game} players={players} />
           </Card>
 
@@ -1692,14 +1859,14 @@ function ScoreHeader({ game, team }) {
 }
 
 /* ---------------- SUMMARY ---------------- */
-function SummaryView({ game, team, players, scorekeeper, generating, generateRecap, updateReport, updateGameMeta, reopenGame, deleteGame, goHome }) {
+function SummaryView({ game, team, players, scorekeeper, generating, generateRecap, updateReport, updateGameMeta, reopenGame, goEditOldGame, deleteGame, goHome }) {
   const [editing, setEditing] = useState(false);
   const [opponent, setOpponent] = useState(game.opponent);
   const [date, setDate] = useState(game.date);
   const [ourScore, setOurScore] = useState(game.ourScore);
   const [theirScore, setTheirScore] = useState(game.theirScore);
 
-  const rows = game.lineup.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: computeStatsFromPlays(p.id, game.plays, game.scores) }));
+  const rows = game.lineup.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: statsForPlayerInGame(game, p.id) }));
 
   const emailHref = () => {
     const subject = encodeURIComponent(`${team ? team.name : "Game"} vs ${game.opponent} — ${game.date}`);
@@ -1728,7 +1895,11 @@ function SummaryView({ game, team, players, scorekeeper, generating, generateRec
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <Btn tone="amber" size="sm" onClick={() => { updateGameMeta({ opponent, date, ourScore, theirScore }); setEditing(false); }}>Save Changes</Btn>
-                <Btn tone="ghost" size="sm" onClick={reopenGame}>Reopen Game (Fix Plays)</Btn>
+                {game.source === "manual" ? (
+                  <Btn tone="ghost" size="sm" onClick={goEditOldGame}>Edit Stats</Btn>
+                ) : (
+                  <Btn tone="ghost" size="sm" onClick={reopenGame}>Reopen Game (Fix Plays)</Btn>
+                )}
                 <Btn tone="red" size="sm" onClick={() => { if (window.confirm(`Delete this game vs ${game.opponent}? This can't be undone.`)) deleteGame(game.id); }}>Delete Game</Btn>
               </div>
             </>
@@ -1738,7 +1909,7 @@ function SummaryView({ game, team, players, scorekeeper, generating, generateRec
 
       <Eyebrow>Final Box Score</Eyebrow>
       <Card style={{ marginBottom: 16 }}>
-        <BoxScoreTable lineup={game.lineup} players={players} plays={game.plays} scores={game.scores} />
+        <BoxScoreTable game={game} players={players} />
       </Card>
 
       {game.substitutions.length > 0 && (
@@ -1811,9 +1982,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
     loadFinalGamesForTeam(teamId).then((g) => { setGames(g); setLoading(false); });
   }, [teamId, loadFinalGamesForTeam]);
   const rosterPlayers = players.filter((p) => p.teamId === teamId);
-  const allPlays = games.flatMap((g) => g.plays);
-  const allScores = games.flatMap((g) => g.scores || []);
-  const rows = rosterPlayers.map((p) => ({ p, s: computeStatsFromPlays(p.id, allPlays, allScores) })).sort((a, b) => b.s[sortKey] - a.s[sortKey]);
+  const rows = rosterPlayers.map((p) => ({ p, s: aggregateSeasonStats(p.id, games) })).sort((a, b) => b.s[sortKey] - a.s[sortKey]);
   const sortable = ["AVG", "OBP", "SLG", "H", "R", "RBI", "HR", "BB", "K"];
 
   const fieldingTotals = {};
