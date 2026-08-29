@@ -290,12 +290,15 @@ function Eyebrow({ children }) {
 }
 function Diamond({ bases, names }) {
   const pos = { home: [100, 160], 1: [165, 100], 2: [100, 40], 3: [35, 100] };
-  const labelPos = { 1: [pos[1][0] + 14, pos[1][1] + 4], 2: [pos[2][0], pos[2][1] - 16], 3: [pos[3][0] - 14, pos[3][1] + 4] };
-  const labelAnchor = { 1: "start", 2: "middle", 3: "end" };
+  // Labels are centered under (or above, for 2nd) each base rather than
+  // anchored out to the side — a side anchor ran names straight into the
+  // edge of the SVG canvas and clipped them. Centering plus a wider canvas
+  // (below) gives full first names room regardless of length.
+  const labelPos = { 1: [pos[1][0], pos[1][1] + 22], 2: [pos[2][0], pos[2][1] - 16], 3: [pos[3][0], pos[3][1] + 22] };
   const baseFill = (n) => (bases[n] ? C.amber : "transparent");
   const baseStroke = (n) => (bases[n] ? C.amber : C.chalk);
   return (
-    <svg viewBox="0 0 200 190" style={{ width: 170, height: 160 }}>
+    <svg viewBox="-25 0 250 190" style={{ width: 210, height: 160 }}>
       <polygon points={`${pos.home.join(",")} ${pos[1].join(",")} ${pos[2].join(",")} ${pos[3].join(",")}`} fill="none" stroke={C.chalkDim} strokeWidth="2" opacity="0.5" />
       {[1, 2, 3].map((n) => (
         <g key={n}>
@@ -311,7 +314,7 @@ function Diamond({ bases, names }) {
             style={{ filter: bases[n] ? `drop-shadow(0 0 6px ${C.amber})` : "none" }}
           />
           {bases[n] && names && names[n] && (
-            <text x={labelPos[n][0]} y={labelPos[n][1]} textAnchor={labelAnchor[n]} fill={C.amber} fontFamily="IBM Plex Mono, monospace" fontSize="11" fontWeight="700">
+            <text x={labelPos[n][0]} y={labelPos[n][1]} textAnchor="middle" fill={C.amber} fontFamily="IBM Plex Mono, monospace" fontSize="12" fontWeight="700">
               {names[n]}
             </text>
           )}
