@@ -666,6 +666,14 @@ function Scorebook() {
     };
     persistGame(g);
   };
+  // HBP / reached-on-error: batter is awarded 1st with no batted ball involved,
+  // so — like a walk — this only forces a runner ahead if they're directly
+  // blocked off their base, unlike the hit buttons which advance everyone.
+  const recordDefenseForcedBase = () => {
+    if (!activeGame) return;
+    const { bases } = placeDefenseRunner(activeGame.defenseBases, 1);
+    persistGame({ ...activeGame, defenseBases: bases, count: { balls: 0, strikes: 0 } });
+  };
 
   const skipHalf = () => activeGame && persistGame(flipHalf(activeGame));
 
@@ -914,6 +922,7 @@ function Scorebook() {
             toggleDefenseBase={toggleDefenseBase}
             defenseBaseAction={defenseBaseAction}
             recordDefenseHit={recordDefenseHit}
+            recordDefenseForcedBase={recordDefenseForcedBase}
             setPosition={setPosition}
             bumpFielding={bumpFielding}
             substitutePlayer={substitutePlayer}
@@ -1557,7 +1566,7 @@ function LiveGameView(props) {
   const {
     game, team, players, usBatting, scorekeeper, selectedBase,
     recordOutcome, tapBase, runnerAction, defenseOut, theirRun, skipHalf, undoLastAction, canUndo, endGame,
-    selectedDefenseBase, setSelectedDefenseBase, toggleDefenseBase, defenseBaseAction, recordDefenseHit,
+    selectedDefenseBase, setSelectedDefenseBase, toggleDefenseBase, defenseBaseAction, recordDefenseHit, recordDefenseForcedBase,
     setPosition, bumpFielding, substitutePlayer, setOurPitcher, setTheirPitcherName, bumpPitchAndCount,
     goHome,
   } = props;
@@ -1713,11 +1722,13 @@ function LiveGameView(props) {
                   </div>
                 )}
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.line}22` }}>
-                  <span style={{ fontSize: 12, color: C.chalkDim, alignSelf: "center", marginRight: 4 }}>Their batter got a:</span>
+                  <span style={{ fontSize: 12, color: C.chalkDim, alignSelf: "center", marginRight: 4 }}>Their batter reached on a:</span>
                   <Btn size="sm" tone="dirt" onClick={() => recordDefenseHit(1)}>Single</Btn>
                   <Btn size="sm" tone="dirt" onClick={() => recordDefenseHit(2)}>Double</Btn>
                   <Btn size="sm" tone="dirt" onClick={() => recordDefenseHit(3)}>Triple</Btn>
                   <Btn size="sm" tone="amber" onClick={() => recordDefenseHit(4)}>Home Run</Btn>
+                  <Btn size="sm" tone="dirt" onClick={recordDefenseForcedBase} style={{ background: C.navy }}>HBP</Btn>
+                  <Btn size="sm" tone="red" onClick={recordDefenseForcedBase}>Error</Btn>
                 </div>
               </Card>
 
