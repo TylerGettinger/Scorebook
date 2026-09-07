@@ -41,20 +41,23 @@ const OUTCOMES = [
 const outcomeByKey = (k) => OUTCOMES.find((o) => o.key === k);
 
 // Generic (no player identity) baserunner helpers for defense — mirrors the
-// force-cascade logic used for our own offense, but returns run counts
-// instead of crediting a specific player.
-function placeDefenseRunner(bases, base) {
+// force-cascade logic used for our own offense, but tracks a transient id per
+// runner (instead of a name) so the UI can animate the same runner sliding
+// from base to base, and returns run counts instead of crediting a player.
+function placeDefenseRunner(bases, base, id) {
   if (base >= 4) return { bases, scored: 1 };
   if (bases[base]) {
-    const pushed = placeDefenseRunner(bases, base + 1);
-    return { bases: { ...pushed.bases, [base]: true }, scored: pushed.scored };
+    const occupantId = bases[base];
+    const pushed = placeDefenseRunner(bases, base + 1, occupantId);
+    return { bases: { ...pushed.bases, [base]: id }, scored: pushed.scored };
   }
-  return { bases: { ...bases, [base]: true }, scored: 0 };
+  return { bases: { ...bases, [base]: id }, scored: 0 };
 }
 function moveDefenseRunner(bases, fromBase, toBase) {
-  const cleared = { ...bases, [fromBase]: false };
+  const id = bases[fromBase];
+  const cleared = { ...bases, [fromBase]: null };
   if (toBase >= 4) return { bases: cleared, scored: 1 };
-  return placeDefenseRunner(cleared, toBase);
+  return placeDefenseRunner(cleared, toBase, id);
 }
 
 const POSITIONS = ["P", "C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "EX"];
@@ -84,7 +87,7 @@ function emptyGameState() {
     totalPitchingOuts: 0, // cumulative outs recorded while WE are on defense (doesn't reset each half)
     count: { balls: 0, strikes: 0 }, // current batter's live ball-strike count
     bases: { 1: null, 2: null, 3: null },
-    defenseBases: { 1: false, 2: false, 3: false }, // generic baserunners (no identity) while WE are on defense
+    defenseBases: { 1: null, 2: null, 3: null }, // generic baserunners (transient id, no name) while WE are on defense
     plays: [],
     scores: [],
     currentPlayId: null,
@@ -288,39 +291,83 @@ function Eyebrow({ children }) {
     </div>
   );
 }
-function Diamond({ bases, names }) {
-  const pos = { home: [100, 160], 1: [165, 100], 2: [100, 40], 3: [35, 100] };
-  // Labels are centered under (or above, for 2nd) each base rather than
-  // anchored out to the side — a side anchor ran names straight into the
-  // edge of the SVG canvas and clipped them. Centering plus a wider canvas
-  // (below) gives full first names room regardless of length.
-  const labelPos = { 1: [pos[1][0], pos[1][1] + 22], 2: [pos[2][0], pos[2][1] - 16], 3: [pos[3][0], pos[3][1] + 22] };
-  const baseFill = (n) => (bases[n] ? C.amber : "transparent");
-  const baseStroke = (n) => (bases[n] ? C.amber : C.chalk);
+const FIELD_BASE_XY = { 1: [225, 205], 2: [150, 130], 3: [75, 205] };
+const FIELD_HOME = [150, 280];
+const FIELD_MOUND = [150, 215];
+const FIELD_ZONES = {
+  LF: [70, 100], LC: [112, 60], CF: [150, 45], RC: [188, 60], RF: [230, 100], IF: [150, 172],
+};
+const FIELD_ZONE_LABELS = { LF: "Left Field", LC: "Left-Center", CF: "Center Field", RC: "Right-Center", RF: "Right Field", IF: "Infield" };
+
+// A stylized (not pixel-accurate) softball field: grass outfield, dirt/grass
+// infield, foul lines, mound and home plate — replacing the plain diamond
+// outline so the live view actually looks like a field.
+function GameField({ runners, hasBatter, pitchTrigger, flight }) {
   return (
-    <svg viewBox="-25 0 250 190" style={{ width: 210, height: 160 }}>
-      <polygon points={`${pos.home.join(",")} ${pos[1].join(",")} ${pos[2].join(",")} ${pos[3].join(",")}`} fill="none" stroke={C.chalkDim} strokeWidth="2" opacity="0.5" />
+    <svg viewBox="0 0 300 300" style={{ width: 250, height: 250 }}>
+      {/* outfield grass */}
+      <path d="M 75,205 Q 20,90 150,40 Q 280,90 225,205 Z" fill={C.green} />
+      {/* infield dirt */}
+      <polygon points="150,300 255,205 150,100 45,205" fill={C.dirt} opacity="0.92" />
+      {/* infield grass */}
+      <polygon points="150,280 225,205 150,130 75,205" fill={C.greenLight} />
+      {/* foul lines */}
+      <line x1={FIELD_HOME[0]} y1={FIELD_HOME[1]} x2={228} y2={58} stroke={C.chalk} strokeWidth="2" opacity="0.8" />
+      <line x1={FIELD_HOME[0]} y1={FIELD_HOME[1]} x2={72} y2={58} stroke={C.chalk} strokeWidth="2" opacity="0.8" />
+      {/* mound */}
+      <circle cx={FIELD_MOUND[0]} cy={FIELD_MOUND[1]} r={15} fill={C.dirt} stroke={C.dirtLight} strokeWidth="1" />
+      <rect x={FIELD_MOUND[0] - 6} y={FIELD_MOUND[1] - 2} width={12} height={4} fill={C.chalk} />
+      {/* pitcher figure */}
+      <circle cx={FIELD_MOUND[0]} cy={FIELD_MOUND[1] - 14} r={5.5} fill={C.ink} />
+      <line x1={FIELD_MOUND[0]} y1={FIELD_MOUND[1] - 9} x2={FIELD_MOUND[0]} y2={FIELD_MOUND[1] + 4} stroke={C.ink} strokeWidth="3" strokeLinecap="round" />
+      {/* bases */}
       {[1, 2, 3].map((n) => (
-        <g key={n}>
-          <rect
-            x={pos[n][0] - 10}
-            y={pos[n][1] - 10}
-            width="20"
-            height="20"
-            transform={`rotate(45 ${pos[n][0]} ${pos[n][1]})`}
-            fill={baseFill(n)}
-            stroke={baseStroke(n)}
-            strokeWidth="2.5"
-            style={{ filter: bases[n] ? `drop-shadow(0 0 6px ${C.amber})` : "none" }}
-          />
-          {bases[n] && names && names[n] && (
-            <text x={labelPos[n][0]} y={labelPos[n][1]} textAnchor="middle" fill={C.amber} fontFamily="IBM Plex Mono, monospace" fontSize="12" fontWeight="700">
-              {names[n]}
-            </text>
-          )}
-        </g>
+        <rect
+          key={n}
+          x={FIELD_BASE_XY[n][0] - 9}
+          y={FIELD_BASE_XY[n][1] - 9}
+          width="18"
+          height="18"
+          transform={`rotate(45 ${FIELD_BASE_XY[n][0]} ${FIELD_BASE_XY[n][1]})`}
+          fill={C.chalk}
+          stroke={C.dirt}
+          strokeWidth="2"
+        />
       ))}
-      <rect x={pos.home[0] - 9} y={pos.home[1] - 9} width="18" height="18" fill={C.chalk} stroke={C.dirt} strokeWidth="2" transform={`rotate(45 ${pos.home[0]} ${pos.home[1]})`} />
+      {/* home plate */}
+      <polygon points="140,272 160,272 160,284 150,292 140,284" fill={C.chalk} stroke={C.dirt} strokeWidth="1.5" />
+      {hasBatter && <circle cx={FIELD_HOME[0] - 16} cy={FIELD_HOME[1] - 6} r={6} fill={C.amber} stroke={C.ink} strokeWidth="1.5" />}
+
+      {/* pitch animation: ball travels mound -> plate on every ball/strike tap */}
+      {pitchTrigger > 0 && (
+        <circle key={`pitch-${pitchTrigger}`} r="3.5" fill={C.chalk} stroke={C.ink} strokeWidth="0.5">
+          <animate attributeName="cx" values={`${FIELD_MOUND[0]};${FIELD_HOME[0]}`} dur="0.35s" fill="freeze" />
+          <animate attributeName="cy" values={`${FIELD_MOUND[1]};${FIELD_HOME[1] - 10}`} dur="0.35s" fill="freeze" />
+        </circle>
+      )}
+
+      {/* hit-location animation: ball flies from home plate out to the chosen zone */}
+      {flight && (
+        <circle key={`flight-${flight.key}`} r="4.5" fill={C.amber} stroke={C.ink} strokeWidth="0.5">
+          <animate attributeName="cx" values={`${FIELD_HOME[0]};${flight.x}`} dur="0.65s" fill="freeze" />
+          <animate attributeName="cy" values={`${FIELD_HOME[1] - 10};${flight.y}`} dur="0.65s" fill="freeze" />
+        </circle>
+      )}
+
+      {/* baserunners — keyed by a stable id so they slide between bases instead of teleporting */}
+      {runners.map((r) => {
+        const [x, y] = FIELD_BASE_XY[r.base];
+        return (
+          <g key={r.key}>
+            <circle cx={x} cy={y - 4} r="9" fill={C.amber} stroke={C.ink} strokeWidth="1.5" style={{ transition: "cx 0.6s ease, cy 0.6s ease" }} />
+            {r.label && (
+              <text x={x} y={y + 22} textAnchor="middle" fill={C.amber} fontFamily="IBM Plex Mono, monospace" fontSize="11" fontWeight="700" style={{ transition: "x 0.6s ease, y 0.6s ease" }}>
+                {r.label}
+              </text>
+            )}
+          </g>
+        );
+      })}
     </svg>
   );
 }
@@ -531,7 +578,7 @@ function Scorebook() {
   const flipHalf = (g) => {
     const half = g.half === "top" ? "bottom" : "top";
     const inning = g.half === "top" ? g.inning : g.inning + 1;
-    return { ...g, half, inning, outs: 0, bases: { 1: null, 2: null, 3: null }, defenseBases: { 1: false, 2: false, 3: false }, currentPlayId: null, count: { balls: 0, strikes: 0 } };
+    return { ...g, half, inning, outs: 0, bases: { 1: null, 2: null, 3: null }, defenseBases: { 1: null, 2: null, 3: null }, currentPlayId: null, count: { balls: 0, strikes: 0 } };
   };
   const scoreRunner = (g, playerId, creditRbi) => {
     const scores = [...g.scores, { playerId, playId: g.currentPlayId, creditRbi }];
@@ -548,12 +595,12 @@ function Scorebook() {
     return { ...g, bases: { ...g.bases, [base]: playerId } };
   };
 
-  const recordOutcome = (key, pitchingPatch) => {
+  const recordOutcome = (key, pitchingPatch, location) => {
     if (!activeGame || !usBatting) return;
     const o = outcomeByKey(key);
     const batter = players.find((p) => p.id === activeGame.lineup[activeGame.currentBatterIndex % activeGame.lineup.length]);
     if (!batter) return;
-    const play = { id: crypto.randomUUID(), playerId: batter.id, outcome: key, rbi: 0, inning: activeGame.inning, half: activeGame.half, ts: Date.now() };
+    const play = { id: crypto.randomUUID(), playerId: batter.id, outcome: key, rbi: 0, inning: activeGame.inning, half: activeGame.half, ts: Date.now(), location: location || null };
     let g = { ...activeGame, plays: [...activeGame.plays, play], currentPlayId: play.id, pitching: pitchingPatch || activeGame.pitching };
     if (o.out) g = { ...g, outs: g.outs + 1 };
     if (o.key === "HR") {
@@ -617,12 +664,12 @@ function Scorebook() {
     persistGame(g);
   };
 
-  /* ---------- defense baserunners (no identity — just occupied/empty) ---------- */
+  /* ---------- defense baserunners (transient id, no name — for animation only) ---------- */
   const toggleDefenseBase = (n) => {
     // Tapping an empty base places a runner there. Tapping an occupied base is
     // handled by the parent opening the action menu instead of calling this.
     if (!activeGame || activeGame.defenseBases[n]) return;
-    const { bases } = placeDefenseRunner(activeGame.defenseBases, n);
+    const { bases } = placeDefenseRunner(activeGame.defenseBases, n, crypto.randomUUID());
     persistGame({ ...activeGame, defenseBases: bases });
   };
   const defenseBaseAction = (base, action) => {
@@ -632,10 +679,10 @@ function Scorebook() {
       const { bases } = moveDefenseRunner(g.defenseBases, base, base + 1);
       g = { ...g, defenseBases: bases };
     } else if (action === "score-earned" || action === "score-unearned") {
-      g = { ...g, defenseBases: { ...g.defenseBases, [base]: false }, theirScore: g.theirScore + 1 };
+      g = { ...g, defenseBases: { ...g.defenseBases, [base]: null }, theirScore: g.theirScore + 1 };
       if (action === "score-earned") g = { ...g, pitching: { ...g.pitching, ourEarnedRuns: g.pitching.ourEarnedRuns + 1 } };
     } else if (action === "out") {
-      g = { ...g, defenseBases: { ...g.defenseBases, [base]: false }, outs: g.outs + 1, totalPitchingOuts: g.totalPitchingOuts + 1 };
+      g = { ...g, defenseBases: { ...g.defenseBases, [base]: null }, outs: g.outs + 1, totalPitchingOuts: g.totalPitchingOuts + 1 };
       if (g.outs >= 3) g = flipHalf(g);
     }
     setSelectedDefenseBase(null);
@@ -650,15 +697,15 @@ function Scorebook() {
     let runsScored = 0;
     if (n >= 4) {
       runsScored = [1, 2, 3].filter((b) => g.defenseBases[b]).length + 1;
-      g = { ...g, defenseBases: { 1: false, 2: false, 3: false } };
+      g = { ...g, defenseBases: { 1: null, 2: null, 3: null } };
     } else {
-      let nb = { 1: false, 2: false, 3: false };
+      let nb = { 1: null, 2: null, 3: null };
       [3, 2, 1].forEach((from) => {
         if (!g.defenseBases[from]) return;
         const dest = from + n;
-        if (dest >= 4) runsScored += 1; else nb = { ...nb, [dest]: true };
+        if (dest >= 4) runsScored += 1; else nb = { ...nb, [dest]: g.defenseBases[from] };
       });
-      nb = { ...nb, [n]: true };
+      nb = { ...nb, [n]: crypto.randomUUID() };
       g = { ...g, defenseBases: nb };
     }
     g = {
@@ -674,7 +721,7 @@ function Scorebook() {
   // blocked off their base, unlike the hit buttons which advance everyone.
   const recordDefenseForcedBase = () => {
     if (!activeGame) return;
-    const { bases } = placeDefenseRunner(activeGame.defenseBases, 1);
+    const { bases } = placeDefenseRunner(activeGame.defenseBases, 1, crypto.randomUUID());
     persistGame({ ...activeGame, defenseBases: bases, count: { balls: 0, strikes: 0 } });
   };
 
@@ -760,7 +807,7 @@ function Scorebook() {
         if (side === "their") { recordOutcome("BB", newPitching); return; }
         // side === 'our': opponent's batter walks — place them on 1st (forcing
         // anyone already there ahead), even though we don't track their lineup.
-        const { bases } = placeDefenseRunner(activeGame.defenseBases, 1);
+        const { bases } = placeDefenseRunner(activeGame.defenseBases, 1, crypto.randomUUID());
         persistGame({ ...activeGame, pitching: newPitching, count: { balls: 0, strikes: 0 }, defenseBases: bases });
         return;
       }
@@ -1582,8 +1629,25 @@ function LiveGameView(props) {
   };
   const defensivePlayers = game.lineup.map((id) => players.find((p) => p.id === id)).filter(Boolean);
   const ourPitcher = players.find((p) => p.id === game.pitching.ourPitcherId);
-  const diamondBases = usBatting ? game.bases : game.defenseBases;
-  const diamondNames = usBatting ? baseNames : undefined;
+
+  // Field animation state — purely cosmetic, not persisted.
+  const [pitchTrigger, setPitchTrigger] = useState(0);
+  const [flight, setFlight] = useState(null);
+  const [pendingOutcome, setPendingOutcome] = useState(null); // { side: 'offense'|'defense', key }
+
+  const runners = usBatting
+    ? [1, 2, 3].filter((n) => game.bases[n]).map((n) => ({ key: game.bases[n], base: n, label: baseNames[n] }))
+    : [1, 2, 3].filter((n) => game.defenseBases[n]).map((n) => ({ key: game.defenseBases[n], base: n, label: null }));
+
+  const throwPitch = (fn) => { setPitchTrigger((k) => k + 1); fn(); };
+  const beginLocationPick = (side, key) => setPendingOutcome({ side, key });
+  const commitLocation = (zone) => {
+    if (!pendingOutcome) return;
+    if (zone) setFlight({ key: Date.now(), x: FIELD_ZONES[zone][0], y: FIELD_ZONES[zone][1] });
+    if (pendingOutcome.side === "offense") recordOutcome(pendingOutcome.key, undefined, zone);
+    else recordDefenseHit(pendingOutcome.key);
+    setPendingOutcome(null);
+  };
 
   return (
     <div>
@@ -1594,7 +1658,7 @@ function LiveGameView(props) {
         <div>
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16 }}>
             <Card style={{ flex: "0 0 auto" }}>
-              <Diamond bases={diamondBases} names={diamondNames} />
+              <GameField runners={runners} hasBatter={usBatting} pitchTrigger={pitchTrigger} flight={flight} />
               <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 10 }}>
                 <div style={{ textAlign: "center" }}>
                   <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>COUNT</div>
@@ -1606,6 +1670,25 @@ function LiveGameView(props) {
                   <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 28, fontWeight: 700, color: C.chalk }}>{game.outs}<span style={{ fontSize: 16, color: C.chalkDim }}>/3</span></div>
                 </div>
               </div>
+              {pendingOutcome && (
+                <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.line}22` }}>
+                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 11, color: C.amber, letterSpacing: 1, marginBottom: 8, textAlign: "center" }}>WHERE'D IT GO?</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, justifyContent: "center" }}>
+                    {Object.keys(FIELD_ZONES).map((z) => (
+                      <button
+                        key={z}
+                        onClick={() => commitLocation(z)}
+                        style={{ fontSize: 11, padding: "6px 10px", borderRadius: 12, border: `1px solid ${C.amber}`, background: "transparent", color: C.amber, cursor: "pointer", fontWeight: 600 }}
+                      >
+                        {FIELD_ZONE_LABELS[z]}
+                      </button>
+                    ))}
+                    <button onClick={() => commitLocation(null)} style={{ fontSize: 11, padding: "6px 10px", borderRadius: 12, border: `1px solid ${C.line}`, background: "transparent", color: C.chalkDim, cursor: "pointer" }}>
+                      Skip
+                    </button>
+                  </div>
+                </div>
+              )}
             </Card>
 
             {selectedBase != null && scorekeeper && (
@@ -1650,7 +1733,7 @@ function LiveGameView(props) {
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(80px, 1fr))", gap: 8 }}>
                 {OUTCOMES.map((o) => (
-                  <button key={o.key} title={o.full} onClick={() => recordOutcome(o.key)} style={{ padding: "14px 6px", borderRadius: 10, border: `1px solid ${C.line}55`, background: o.out ? C.navy : o.hit ? C.amber : C.dirt, color: o.out ? C.chalk : o.hit ? C.ink : C.chalk, fontFamily: "IBM Plex Mono, monospace", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
+                  <button key={o.key} title={o.full} onClick={() => (["1B", "2B", "3B", "HR"].includes(o.key) ? beginLocationPick("offense", o.key) : recordOutcome(o.key))} style={{ padding: "14px 6px", borderRadius: 10, border: `1px solid ${C.line}55`, background: o.out ? C.navy : o.hit ? C.amber : C.dirt, color: o.out ? C.chalk : o.hit ? C.ink : C.chalk, fontFamily: "IBM Plex Mono, monospace", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
                     {o.label}
                   </button>
                 ))}
@@ -1675,8 +1758,8 @@ function LiveGameView(props) {
               }
               balls={game.pitching.theirBalls}
               strikes={game.pitching.theirStrikes}
-              onBall={() => bumpPitchAndCount("their", "ball", 1)}
-              onStrike={() => bumpPitchAndCount("their", "strike", 1)}
+              onBall={() => throwPitch(() => bumpPitchAndCount("their", "ball", 1))}
+              onStrike={() => throwPitch(() => bumpPitchAndCount("their", "strike", 1))}
               onUndo={undoLastAction}
               canUndo={canUndo}
             />
@@ -1726,10 +1809,10 @@ function LiveGameView(props) {
                 )}
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.line}22` }}>
                   <span style={{ fontSize: 12, color: C.chalkDim, alignSelf: "center", marginRight: 4 }}>Their batter reached on a:</span>
-                  <Btn size="sm" tone="dirt" onClick={() => recordDefenseHit(1)}>Single</Btn>
-                  <Btn size="sm" tone="dirt" onClick={() => recordDefenseHit(2)}>Double</Btn>
-                  <Btn size="sm" tone="dirt" onClick={() => recordDefenseHit(3)}>Triple</Btn>
-                  <Btn size="sm" tone="amber" onClick={() => recordDefenseHit(4)}>Home Run</Btn>
+                  <Btn size="sm" tone="dirt" onClick={() => beginLocationPick("defense", 1)}>Single</Btn>
+                  <Btn size="sm" tone="dirt" onClick={() => beginLocationPick("defense", 2)}>Double</Btn>
+                  <Btn size="sm" tone="dirt" onClick={() => beginLocationPick("defense", 3)}>Triple</Btn>
+                  <Btn size="sm" tone="amber" onClick={() => beginLocationPick("defense", 4)}>Home Run</Btn>
                   <Btn size="sm" tone="dirt" onClick={recordDefenseForcedBase} style={{ background: C.navy }}>HBP</Btn>
                   <Btn size="sm" tone="red" onClick={recordDefenseForcedBase}>Error</Btn>
                 </div>
@@ -1748,8 +1831,8 @@ function LiveGameView(props) {
                 }
                 balls={game.pitching.ourBalls}
                 strikes={game.pitching.ourStrikes}
-                onBall={() => bumpPitchAndCount("our", "ball", 1)}
-                onStrike={() => bumpPitchAndCount("our", "strike", 1)}
+                onBall={() => throwPitch(() => bumpPitchAndCount("our", "ball", 1))}
+                onStrike={() => throwPitch(() => bumpPitchAndCount("our", "strike", 1))}
                 disabled={!game.pitching.ourPitcherId}
                 onUndo={undoLastAction}
                 canUndo={canUndo}
