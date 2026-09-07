@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { supabase } from "./lib/supabaseClient.js";
 
 /* ---------------------------------------------------------
@@ -21,10 +21,6 @@ const C = {
   ink: "#26241D",
 };
 
-// A game is assumed to run this many innings when computing ERA (typical for
-// travel/high-school softball). Doesn't affect anything except that one number.
-const ERA_INNINGS = 7;
-
 const OUTCOMES = [
   { key: "1B", label: "1B", full: "Single", ab: true, hit: true, bases: 1, out: false },
   { key: "2B", label: "2B", full: "Double", ab: true, hit: true, bases: 2, out: false },
@@ -40,69 +36,28 @@ const OUTCOMES = [
 ];
 const outcomeByKey = (k) => OUTCOMES.find((o) => o.key === k);
 
-// Generic (no player identity) baserunner helpers for defense — mirrors the
-// force-cascade logic used for our own offense, but tracks a transient id per
-// runner (instead of a name) so the UI can animate the same runner sliding
-// from base to base, and returns run counts instead of crediting a player.
-function placeDefenseRunner(bases, base, id) {
-  if (base >= 4) return { bases, scored: 1 };
-  if (bases[base]) {
-    const occupantId = bases[base];
-    const pushed = placeDefenseRunner(bases, base + 1, occupantId);
-    return { bases: { ...pushed.bases, [base]: id }, scored: pushed.scored };
-  }
-  return { bases: { ...bases, [base]: id }, scored: 0 };
-}
-function moveDefenseRunner(bases, fromBase, toBase) {
-  const id = bases[fromBase];
-  const cleared = { ...bases, [fromBase]: null };
-  if (toBase >= 4) return { bases: cleared, scored: 1 };
-  return placeDefenseRunner(cleared, toBase, id);
-}
-
 const POSITIONS = ["P", "C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "EX"];
 
-function emptyPitchingState() {
-  return {
-    ourPitcherId: null,
-    ourBalls: 0,
-    ourStrikes: 0,
-    ourOutsAtStintStart: 0,
-    ourEarnedRuns: 0,
-    ourHistory: [], // [{ playerId, balls, strikes, outsRecorded, earnedRuns }]
-    theirName: "",
-    theirBalls: 0,
-    theirStrikes: 0,
-  };
-}
 function emptyGameState() {
   return {
-    source: "live", // 'live' (tracked play-by-play in this app) or 'manual' (old game, entered as a final box score)
-    manualStats: {}, // playerId -> { AB, R, H, 2B, 3B, HR, RBI, BB, HBP, K, SF } — used only when source === 'manual'
     lineup: [],
     currentBatterIndex: 0,
     inning: 1,
     half: "top",
     outs: 0,
-    totalPitchingOuts: 0, // cumulative outs recorded while WE are on defense (doesn't reset each half)
-    count: { balls: 0, strikes: 0 }, // current batter's live ball-strike count
     bases: { 1: null, 2: null, 3: null },
-    defenseBases: { 1: null, 2: null, 3: null }, // generic baserunners (transient id, no name) while WE are on defense
     plays: [],
     scores: [],
     currentPlayId: null,
     report: "",
     defense: { positions: {} }, // playerId -> position code
     fielding: {}, // playerId -> { PO, A, E }
-    pitching: emptyPitchingState(),
-    substitutions: [], // [{ inning, half, slotIndex, outPlayerId, inPlayerId, ts }]
+    pitching: { ourPitcherId: null, ourCount: 0, ourHistory: [], theirName: "", theirCount: 0 },
   };
 }
 
 /* ---------------- row <-> app-object mapping ---------------- */
 function rowToGame(row) {
-  const base = { ...emptyGameState(), ...(row.state || {}) };
-  base.pitching = { ...emptyPitchingState(), ...(base.pitching || {}) };
   return {
     id: row.id,
     teamId: row.team_id,
@@ -112,7 +67,8 @@ function rowToGame(row) {
     status: row.status,
     ourScore: row.our_score,
     theirScore: row.their_score,
-    ...base,
+    ...emptyGameState(),
+    ...(row.state || {}),
   };
 }
 function gameToRow(g) {
@@ -154,93 +110,14 @@ function computeStatsFromPlays(playerId, plays, scores) {
   for (const sc of scores || []) {
     if (sc.playerId === playerId) s.R += 1;
   }
-  return withRates(s);
-}
-function withRates(s) {
   const totalBases = s.H - s["2B"] - s["3B"] - s.HR + s["2B"] * 2 + s["3B"] * 3 + s.HR * 4;
-  return {
-    ...s,
-    AVG: s.AB > 0 ? s.H / s.AB : 0,
-    OBP: s.AB + s.BB + s.HBP + s.SF > 0 ? (s.H + s.BB + s.HBP) / (s.AB + s.BB + s.HBP + s.SF) : 0,
-    SLG: s.AB > 0 ? totalBases / s.AB : 0,
-  };
+  s.AVG = s.AB > 0 ? s.H / s.AB : 0;
+  s.OBP = s.AB + s.BB + s.HBP + s.SF > 0 ? (s.H + s.BB + s.HBP) / (s.AB + s.BB + s.HBP + s.SF) : 0;
+  s.SLG = s.AB > 0 ? totalBases / s.AB : 0;
+  return s;
 }
-// Works for both a live-tracked game (computed from individual plays) and a
-// manually-entered old game (computed from a stored final stat line), so
-// season totals and box scores can treat every game the same way.
-function statsForPlayerInGame(game, playerId) {
-  if (game.source === "manual") {
-    const raw = (game.manualStats && game.manualStats[playerId]) || {};
-    const s = { AB: 0, R: 0, H: 0, "2B": 0, "3B": 0, HR: 0, RBI: 0, BB: 0, HBP: 0, K: 0, SF: 0, ...raw };
-    s.PA = s.AB + s.BB + s.HBP + s.SF;
-    return withRates(s);
-  }
-  return computeStatsFromPlays(playerId, game.plays, game.scores);
-}
-function aggregateSeasonStats(playerId, games) {
-  const totals = { PA: 0, AB: 0, R: 0, H: 0, "2B": 0, "3B": 0, HR: 0, RBI: 0, BB: 0, HBP: 0, K: 0, SF: 0 };
-  games.forEach((g) => {
-    const s = statsForPlayerInGame(g, playerId);
-    Object.keys(totals).forEach((k) => { totals[k] += s[k] || 0; });
-  });
-  return withRates(totals);
-}
-
 const fmt3 = (n) => (n === 0 ? ".000" : n.toFixed(3).replace(/^0/, ""));
 const firstName = (full) => (full || "").trim().split(/\s+/)[0] || "";
-function teamRecord(teamId, gameIndex) {
-  const finals = gameIndex.filter((g) => g.teamId === teamId && g.status === "final");
-  const w = finals.filter((g) => g.ourScore > g.theirScore).length;
-  const l = finals.filter((g) => g.ourScore < g.theirScore).length;
-  const t = finals.filter((g) => g.ourScore === g.theirScore).length;
-  return { w, l, t, played: finals.length };
-}
-function RecordBadge({ record, size = 12 }) {
-  if (record.played === 0) return null;
-  return (
-    <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: size, color: C.chalkDim }}>
-      {record.w}-{record.l}{record.t > 0 ? `-${record.t}` : ""}
-    </span>
-  );
-}
-const ipDisplay = (outs) => `${Math.floor(outs / 3)}.${outs % 3}`;
-
-// Resizes an uploaded image down to a small square-ish logo and returns a
-// data URL, so team logos stay lightweight enough to store directly on the row.
-function resizeImageFile(file, maxDim = 200) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const img = new Image();
-      img.onload = () => {
-        let { width, height } = img;
-        if (width > height) { if (width > maxDim) { height = Math.round(height * (maxDim / width)); width = maxDim; } }
-        else { if (height > maxDim) { width = Math.round(width * (maxDim / height)); height = maxDim; } }
-        const canvas = document.createElement("canvas");
-        canvas.width = width; canvas.height = height;
-        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL("image/png"));
-      };
-      img.onerror = reject;
-      img.src = e.target.result;
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-const TEAM_COLORS = ["#E8A33D", "#B3423A", "#2E6F9E", "#6B4FA0", "#2E8B7B", "#C0567F"];
-function pitchingLine(stints) {
-  // stints: [{balls, strikes, outsRecorded, earnedRuns}]
-  const balls = stints.reduce((a, s) => a + (s.balls || 0), 0);
-  const strikes = stints.reduce((a, s) => a + (s.strikes || 0), 0);
-  const outs = stints.reduce((a, s) => a + (s.outsRecorded || 0), 0);
-  const er = stints.reduce((a, s) => a + (s.earnedRuns || 0), 0);
-  const pitches = balls + strikes;
-  const strikePct = pitches > 0 ? (strikes / pitches) * 100 : 0;
-  const ip = outs / 3;
-  const era = ip > 0 ? (er * ERA_INNINGS) / ip : 0;
-  return { balls, strikes, outs, er, pitches, strikePct, ip, era };
-}
 
 /* ---------------- small UI atoms ---------------- */
 function Btn({ children, onClick, tone = "dirt", size = "md", disabled, style }) {
@@ -291,83 +168,36 @@ function Eyebrow({ children }) {
     </div>
   );
 }
-const FIELD_BASE_XY = { 1: [225, 205], 2: [150, 130], 3: [75, 205] };
-const FIELD_HOME = [150, 280];
-const FIELD_MOUND = [150, 215];
-const FIELD_ZONES = {
-  LF: [70, 100], LC: [112, 60], CF: [150, 45], RC: [188, 60], RF: [230, 100], IF: [150, 172],
-};
-const FIELD_ZONE_LABELS = { LF: "Left Field", LC: "Left-Center", CF: "Center Field", RC: "Right-Center", RF: "Right Field", IF: "Infield" };
-
-// A stylized (not pixel-accurate) softball field: grass outfield, dirt/grass
-// infield, foul lines, mound and home plate — replacing the plain diamond
-// outline so the live view actually looks like a field.
-function GameField({ runners, hasBatter, pitchTrigger, flight }) {
+function Diamond({ bases, names }) {
+  const pos = { home: [100, 160], 1: [165, 100], 2: [100, 40], 3: [35, 100] };
+  const labelPos = { 1: [pos[1][0] + 14, pos[1][1] + 4], 2: [pos[2][0], pos[2][1] - 16], 3: [pos[3][0] - 14, pos[3][1] + 4] };
+  const labelAnchor = { 1: "start", 2: "middle", 3: "end" };
+  const baseFill = (n) => (bases[n] ? C.amber : "transparent");
+  const baseStroke = (n) => (bases[n] ? C.amber : C.chalk);
   return (
-    <svg viewBox="0 0 300 300" style={{ width: 250, height: 250 }}>
-      {/* outfield grass */}
-      <path d="M 75,205 Q 20,90 150,40 Q 280,90 225,205 Z" fill={C.green} />
-      {/* infield dirt */}
-      <polygon points="150,300 255,205 150,100 45,205" fill={C.dirt} opacity="0.92" />
-      {/* infield grass */}
-      <polygon points="150,280 225,205 150,130 75,205" fill={C.greenLight} />
-      {/* foul lines */}
-      <line x1={FIELD_HOME[0]} y1={FIELD_HOME[1]} x2={228} y2={58} stroke={C.chalk} strokeWidth="2" opacity="0.8" />
-      <line x1={FIELD_HOME[0]} y1={FIELD_HOME[1]} x2={72} y2={58} stroke={C.chalk} strokeWidth="2" opacity="0.8" />
-      {/* mound */}
-      <circle cx={FIELD_MOUND[0]} cy={FIELD_MOUND[1]} r={15} fill={C.dirt} stroke={C.dirtLight} strokeWidth="1" />
-      <rect x={FIELD_MOUND[0] - 6} y={FIELD_MOUND[1] - 2} width={12} height={4} fill={C.chalk} />
-      {/* pitcher figure */}
-      <circle cx={FIELD_MOUND[0]} cy={FIELD_MOUND[1] - 14} r={5.5} fill={C.ink} />
-      <line x1={FIELD_MOUND[0]} y1={FIELD_MOUND[1] - 9} x2={FIELD_MOUND[0]} y2={FIELD_MOUND[1] + 4} stroke={C.ink} strokeWidth="3" strokeLinecap="round" />
-      {/* bases */}
+    <svg viewBox="0 0 200 190" style={{ width: 170, height: 160 }}>
+      <polygon points={`${pos.home.join(",")} ${pos[1].join(",")} ${pos[2].join(",")} ${pos[3].join(",")}`} fill="none" stroke={C.chalkDim} strokeWidth="2" opacity="0.5" />
       {[1, 2, 3].map((n) => (
-        <rect
-          key={n}
-          x={FIELD_BASE_XY[n][0] - 9}
-          y={FIELD_BASE_XY[n][1] - 9}
-          width="18"
-          height="18"
-          transform={`rotate(45 ${FIELD_BASE_XY[n][0]} ${FIELD_BASE_XY[n][1]})`}
-          fill={C.chalk}
-          stroke={C.dirt}
-          strokeWidth="2"
-        />
+        <g key={n}>
+          <rect
+            x={pos[n][0] - 10}
+            y={pos[n][1] - 10}
+            width="20"
+            height="20"
+            transform={`rotate(45 ${pos[n][0]} ${pos[n][1]})`}
+            fill={baseFill(n)}
+            stroke={baseStroke(n)}
+            strokeWidth="2.5"
+            style={{ filter: bases[n] ? `drop-shadow(0 0 6px ${C.amber})` : "none" }}
+          />
+          {bases[n] && names && names[n] && (
+            <text x={labelPos[n][0]} y={labelPos[n][1]} textAnchor={labelAnchor[n]} fill={C.amber} fontFamily="IBM Plex Mono, monospace" fontSize="11" fontWeight="700">
+              {names[n]}
+            </text>
+          )}
+        </g>
       ))}
-      {/* home plate */}
-      <polygon points="140,272 160,272 160,284 150,292 140,284" fill={C.chalk} stroke={C.dirt} strokeWidth="1.5" />
-      {hasBatter && <circle cx={FIELD_HOME[0] - 16} cy={FIELD_HOME[1] - 6} r={6} fill={C.amber} stroke={C.ink} strokeWidth="1.5" />}
-
-      {/* pitch animation: ball travels mound -> plate on every ball/strike tap */}
-      {pitchTrigger > 0 && (
-        <circle key={`pitch-${pitchTrigger}`} r="3.5" fill={C.chalk} stroke={C.ink} strokeWidth="0.5">
-          <animate attributeName="cx" values={`${FIELD_MOUND[0]};${FIELD_HOME[0]}`} dur="0.35s" fill="freeze" />
-          <animate attributeName="cy" values={`${FIELD_MOUND[1]};${FIELD_HOME[1] - 10}`} dur="0.35s" fill="freeze" />
-        </circle>
-      )}
-
-      {/* hit-location animation: ball flies from home plate out to the chosen zone */}
-      {flight && (
-        <circle key={`flight-${flight.key}`} r="4.5" fill={C.amber} stroke={C.ink} strokeWidth="0.5">
-          <animate attributeName="cx" values={`${FIELD_HOME[0]};${flight.x}`} dur="0.65s" fill="freeze" />
-          <animate attributeName="cy" values={`${FIELD_HOME[1] - 10};${flight.y}`} dur="0.65s" fill="freeze" />
-        </circle>
-      )}
-
-      {/* baserunners — keyed by a stable id so they slide between bases instead of teleporting */}
-      {runners.map((r) => {
-        const [x, y] = FIELD_BASE_XY[r.base];
-        return (
-          <g key={r.key}>
-            <circle cx={x} cy={y - 4} r="9" fill={C.amber} stroke={C.ink} strokeWidth="1.5" style={{ transition: "cx 0.6s ease, cy 0.6s ease" }} />
-            {r.label && (
-              <text x={x} y={y + 22} textAnchor="middle" fill={C.amber} fontFamily="IBM Plex Mono, monospace" fontSize="11" fontWeight="700" style={{ transition: "x 0.6s ease, y 0.6s ease" }}>
-                {r.label}
-              </text>
-            )}
-          </g>
-        );
-      })}
+      <rect x={pos.home[0] - 9} y={pos.home[1] - 9} width="18" height="18" fill={C.chalk} stroke={C.dirt} strokeWidth="2" transform={`rotate(45 ${pos.home[0]} ${pos.home[1]})`} />
     </svg>
   );
 }
@@ -432,23 +262,21 @@ function Scorebook() {
   const [activeGame, setActiveGame] = useState(null);
   const [scorekeeper, setScorekeeper] = useState(false);
   const [selectedBase, setSelectedBase] = useState(null);
-  const [selectedDefenseBase, setSelectedDefenseBase] = useState(null);
-  const [history, setHistory] = useState([]); // client-side undo stack (full game snapshots), not persisted
 
   const refreshRoster = useCallback(async () => {
     const { data: t } = await supabase.from("teams").select("*").order("created_at", { ascending: true });
     const { data: p } = await supabase.from("players").select("*").order("created_at", { ascending: true });
-    setTeams((t || []).map((r) => ({ id: r.id, name: r.name, createdAt: r.created_at, color: r.color || null, logo: r.logo_data || null })));
+    setTeams((t || []).map((r) => ({ id: r.id, name: r.name, createdAt: r.created_at })));
     setPlayers((p || []).map((r) => ({ id: r.id, teamId: r.team_id, name: r.name, number: r.number })));
   }, []);
 
   const refreshGameIndex = useCallback(async () => {
     const { data } = await supabase
       .from("games")
-      .select("id, team_id, opponent, date, status, our_score, their_score, source:state->>source")
+      .select("id, team_id, opponent, date, status, our_score, their_score")
       .order("created_at", { ascending: false });
     setGameIndex(
-      (data || []).map((r) => ({ id: r.id, teamId: r.team_id, opponent: r.opponent, date: r.date, status: r.status, ourScore: r.our_score, theirScore: r.their_score, source: r.source || "live" }))
+      (data || []).map((r) => ({ id: r.id, teamId: r.team_id, opponent: r.opponent, date: r.date, status: r.status, ourScore: r.our_score, theirScore: r.their_score }))
     );
   }, []);
 
@@ -465,31 +293,16 @@ function Scorebook() {
   }, [refreshRoster, refreshGameIndex]);
 
   const persistGame = useCallback(async (g) => {
-    setActiveGame((prev) => {
-      if (prev && prev.id === g.id) setHistory((h) => [...h.slice(-14), prev]);
-      return g;
-    });
+    setActiveGame(g);
     const { error } = await supabase.from("games").update(gameToRow(g)).eq("id", g.id);
     if (error) console.error("game update failed", error);
     setGameIndex((idx) => idx.map((e) => (e.id === g.id ? { ...e, status: g.status, ourScore: g.ourScore, theirScore: g.theirScore, opponent: g.opponent, date: g.date } : e)));
-  }, []);
-
-  const undoLastAction = useCallback(() => {
-    setHistory((h) => {
-      if (h.length === 0) return h;
-      const prev = h[h.length - 1];
-      setActiveGame(prev);
-      supabase.from("games").update(gameToRow(prev)).eq("id", prev.id).then(({ error }) => { if (error) console.error("undo failed", error); });
-      setGameIndex((idx) => idx.map((e) => (e.id === prev.id ? { ...e, status: prev.status, ourScore: prev.ourScore, theirScore: prev.theirScore } : e)));
-      return h.slice(0, -1);
-    });
   }, []);
 
   const openGame = useCallback(async (id) => {
     const { data, error } = await supabase.from("games").select("*").eq("id", id).single();
     if (error || !data) return;
     setActiveGame(rowToGame(data));
-    setHistory([]);
     setView(data.status === "final" ? "summary" : "live");
   }, []);
 
@@ -515,19 +328,9 @@ function Scorebook() {
   const addTeam = async (name) => {
     const { data, error } = await supabase.from("teams").insert({ name }).select().single();
     if (error) return console.error(error);
-    setTeams((t) => [...t, { id: data.id, name: data.name, createdAt: data.created_at, color: null, logo: null }]);
+    setTeams((t) => [...t, { id: data.id, name: data.name, createdAt: data.created_at }]);
     setActiveTeamId(data.id);
     setView("team");
-  };
-  const updateTeamColor = async (teamId, color) => {
-    setTeams((t) => t.map((x) => (x.id === teamId ? { ...x, color } : x)));
-    const { error } = await supabase.from("teams").update({ color }).eq("id", teamId);
-    if (error) console.error(error);
-  };
-  const updateTeamLogo = async (teamId, logo) => {
-    setTeams((t) => t.map((x) => (x.id === teamId ? { ...x, logo } : x)));
-    const { error } = await supabase.from("teams").update({ logo_data: logo }).eq("id", teamId);
-    if (error) console.error(error);
   };
   const addPlayer = async (teamId, name, number) => {
     const { data, error } = await supabase.from("players").insert({ team_id: teamId, name, number }).select().single();
@@ -548,37 +351,16 @@ function Scorebook() {
     if (error) return console.error(error);
     const full = rowToGame(data);
     setActiveGame(full);
-    setHistory([]);
-    setGameIndex((idx) => [{ id: full.id, teamId, opponent, date, status: "live", ourScore: 0, theirScore: 0, source: "live" }, ...idx]);
+    setGameIndex((idx) => [{ id: full.id, teamId, opponent, date, status: "live", ourScore: 0, theirScore: 0 }, ...idx]);
     setView("live");
   };
-
-  // Old games entered as a final box score (no play-by-play). If activeGame is
-  // already a manual game, this edits it in place; otherwise it creates a new one.
-  const saveOldGame = async (payload) => {
-    if (activeGame && activeGame.source === "manual") {
-      persistGame({ ...activeGame, ...payload });
-      setView("summary");
-      return;
-    }
-    const g = { id: undefined, teamId: activeTeamId, isHome: true, status: "final", ...emptyGameState(), source: "manual", ...payload };
-    const row = gameToRow(g);
-    delete row.id;
-    const { data, error } = await supabase.from("games").insert(row).select().single();
-    if (error) return console.error(error);
-    const full = rowToGame(data);
-    setActiveGame(full);
-    setGameIndex((idx) => [{ id: full.id, teamId: full.teamId, opponent: full.opponent, date: full.date, status: "final", ourScore: full.ourScore, theirScore: full.theirScore, source: "manual" }, ...idx]);
-    setView("summary");
-  };
-  const goAddOldGame = () => { setActiveGame(null); setView("oldgame"); };
 
   const usBatting = activeGame ? (activeGame.isHome ? activeGame.half === "bottom" : activeGame.half === "top") : false;
 
   const flipHalf = (g) => {
     const half = g.half === "top" ? "bottom" : "top";
     const inning = g.half === "top" ? g.inning : g.inning + 1;
-    return { ...g, half, inning, outs: 0, bases: { 1: null, 2: null, 3: null }, defenseBases: { 1: null, 2: null, 3: null }, currentPlayId: null, count: { balls: 0, strikes: 0 } };
+    return { ...g, half, inning, outs: 0, bases: { 1: null, 2: null, 3: null }, currentPlayId: null };
   };
   const scoreRunner = (g, playerId, creditRbi) => {
     const scores = [...g.scores, { playerId, playId: g.currentPlayId, creditRbi }];
@@ -595,38 +377,22 @@ function Scorebook() {
     return { ...g, bases: { ...g.bases, [base]: playerId } };
   };
 
-  const recordOutcome = (key, pitchingPatch, location) => {
+  const recordOutcome = (key) => {
     if (!activeGame || !usBatting) return;
     const o = outcomeByKey(key);
     const batter = players.find((p) => p.id === activeGame.lineup[activeGame.currentBatterIndex % activeGame.lineup.length]);
     if (!batter) return;
-    const play = { id: crypto.randomUUID(), playerId: batter.id, outcome: key, rbi: 0, inning: activeGame.inning, half: activeGame.half, ts: Date.now(), location: location || null };
-    let g = { ...activeGame, plays: [...activeGame.plays, play], currentPlayId: play.id, pitching: pitchingPatch || activeGame.pitching };
+    const play = { id: crypto.randomUUID(), playerId: batter.id, outcome: key, rbi: 0, inning: activeGame.inning, half: activeGame.half, ts: Date.now() };
+    let g = { ...activeGame, plays: [...activeGame.plays, play], currentPlayId: play.id };
     if (o.out) g = { ...g, outs: g.outs + 1 };
     if (o.key === "HR") {
       const runners = [1, 2, 3].filter((n) => g.bases[n]).map((n) => g.bases[n]);
       g = { ...g, bases: { 1: null, 2: null, 3: null } };
       [...runners, batter.id].forEach((pid) => { g = scoreRunner(g, pid, true); });
-    } else if (o.key === "1B" || o.key === "2B" || o.key === "3B") {
-      // On a hit, every existing runner advances the same number of bases as the
-      // batter — not just runners directly blocking the batter's target base.
-      // Otherwise a runner on 1st can get left behind when the batter reaches 2nd or 3rd.
-      const advance = o.bases;
-      let g2 = { ...g, bases: { 1: null, 2: null, 3: null } };
-      [3, 2, 1].forEach((fromBase) => {
-        const runnerId = g.bases[fromBase];
-        if (!runnerId) return;
-        const dest = fromBase + advance;
-        g2 = dest >= 4 ? scoreRunner(g2, runnerId, true) : { ...g2, bases: { ...g2.bases, [dest]: runnerId } };
-      });
-      g = { ...g2, bases: { ...g2.bases, [advance]: batter.id } };
     } else if (o.bases > 0) {
-      // Walks / HBP / errors / fielder's choice: only force runners who are
-      // directly blocked off their base (a walk with a runner on 2nd but not 1st
-      // doesn't push that runner to 3rd).
       g = addRunner(g, o.bases, batter.id);
     }
-    g = { ...g, currentBatterIndex: g.currentBatterIndex + 1, count: { balls: 0, strikes: 0 } };
+    g = { ...g, currentBatterIndex: g.currentBatterIndex + 1 };
     if (g.outs >= 3) g = flipHalf(g);
     persistGame(g);
   };
@@ -643,91 +409,30 @@ function Scorebook() {
     persistGame(g);
   };
 
-  const defenseOut = (pitchingPatch) => {
+  const defenseOut = () => {
     if (!activeGame) return;
-    let g = {
-      ...activeGame,
-      outs: activeGame.outs + 1,
-      totalPitchingOuts: activeGame.totalPitchingOuts + 1,
-      count: { balls: 0, strikes: 0 },
-      pitching: pitchingPatch || activeGame.pitching,
-    };
+    let g = { ...activeGame, outs: activeGame.outs + 1 };
     if (g.outs >= 3) g = flipHalf(g);
     persistGame(g);
   };
-  const theirRun = (delta, earned) => {
+  const theirRun = (delta) => {
     if (!activeGame) return;
-    let g = { ...activeGame, theirScore: Math.max(0, activeGame.theirScore + delta) };
-    if (delta > 0 && earned) {
-      g = { ...g, pitching: { ...g.pitching, ourEarnedRuns: g.pitching.ourEarnedRuns + delta } };
-    }
-    persistGame(g);
+    persistGame({ ...activeGame, theirScore: Math.max(0, activeGame.theirScore + delta) });
   };
-
-  /* ---------- defense baserunners (transient id, no name — for animation only) ---------- */
-  const toggleDefenseBase = (n) => {
-    // Tapping an empty base places a runner there. Tapping an occupied base is
-    // handled by the parent opening the action menu instead of calling this.
-    if (!activeGame || activeGame.defenseBases[n]) return;
-    const { bases } = placeDefenseRunner(activeGame.defenseBases, n, crypto.randomUUID());
-    persistGame({ ...activeGame, defenseBases: bases });
-  };
-  const defenseBaseAction = (base, action) => {
-    if (!activeGame) return;
-    let g = { ...activeGame };
-    if (action === "advance") {
-      const { bases } = moveDefenseRunner(g.defenseBases, base, base + 1);
-      g = { ...g, defenseBases: bases };
-    } else if (action === "score-earned" || action === "score-unearned") {
-      g = { ...g, defenseBases: { ...g.defenseBases, [base]: null }, theirScore: g.theirScore + 1 };
-      if (action === "score-earned") g = { ...g, pitching: { ...g.pitching, ourEarnedRuns: g.pitching.ourEarnedRuns + 1 } };
-    } else if (action === "out") {
-      g = { ...g, defenseBases: { ...g.defenseBases, [base]: null }, outs: g.outs + 1, totalPitchingOuts: g.totalPitchingOuts + 1 };
-      if (g.outs >= 3) g = flipHalf(g);
-    }
-    setSelectedDefenseBase(null);
-    persistGame(g);
-  };
-  // Quick "their batter got a hit" buttons: advances every existing runner by
-  // the same number of bases as the hit (same rule as our own hitting), then
-  // places the new batter-runner. n=4 means a home run.
-  const recordDefenseHit = (n) => {
-    if (!activeGame) return;
-    let g = { ...activeGame };
-    let runsScored = 0;
-    if (n >= 4) {
-      runsScored = [1, 2, 3].filter((b) => g.defenseBases[b]).length + 1;
-      g = { ...g, defenseBases: { 1: null, 2: null, 3: null } };
-    } else {
-      let nb = { 1: null, 2: null, 3: null };
-      [3, 2, 1].forEach((from) => {
-        if (!g.defenseBases[from]) return;
-        const dest = from + n;
-        if (dest >= 4) runsScored += 1; else nb = { ...nb, [dest]: g.defenseBases[from] };
-      });
-      nb = { ...nb, [n]: crypto.randomUUID() };
-      g = { ...g, defenseBases: nb };
-    }
-    g = {
-      ...g,
-      theirScore: g.theirScore + runsScored,
-      pitching: runsScored > 0 ? { ...g.pitching, ourEarnedRuns: g.pitching.ourEarnedRuns + runsScored } : g.pitching,
-      count: { balls: 0, strikes: 0 },
-    };
-    persistGame(g);
-  };
-  // HBP / reached-on-error: batter is awarded 1st with no batted ball involved,
-  // so — like a walk — this only forces a runner ahead if they're directly
-  // blocked off their base, unlike the hit buttons which advance everyone.
-  const recordDefenseForcedBase = () => {
-    if (!activeGame) return;
-    const { bases } = placeDefenseRunner(activeGame.defenseBases, 1, crypto.randomUUID());
-    persistGame({ ...activeGame, defenseBases: bases, count: { balls: 0, strikes: 0 } });
-  };
-
   const skipHalf = () => activeGame && persistGame(flipHalf(activeGame));
+  const undoLast = () => {
+    if (!activeGame || activeGame.plays.length === 0) return;
+    const last = activeGame.plays[activeGame.plays.length - 1];
+    const o = outcomeByKey(last.outcome);
+    persistGame({
+      ...activeGame,
+      plays: activeGame.plays.slice(0, -1),
+      currentBatterIndex: Math.max(0, activeGame.currentBatterIndex - 1),
+      outs: o.out ? Math.max(0, activeGame.outs - 1) : activeGame.outs,
+    });
+  };
 
-  /* ---------- defense: positions + fielding ---------- */
+  /* ---------- defense: positions + fielding + pitching ---------- */
   const setPosition = (playerId, pos) => {
     if (!activeGame) return;
     const positions = { ...activeGame.defense.positions };
@@ -740,104 +445,38 @@ function Scorebook() {
     const next = { ...current, [stat]: Math.max(0, current[stat] + delta) };
     persistGame({ ...activeGame, fielding: { ...activeGame.fielding, [playerId]: next } });
   };
-
-  /* ---------- substitutions ---------- */
-  const substitutePlayer = (slotIndex, newPlayerId) => {
-    if (!activeGame) return;
-    const outPlayerId = activeGame.lineup[slotIndex];
-    if (!outPlayerId || outPlayerId === newPlayerId) return;
-    const lineup = [...activeGame.lineup];
-    lineup[slotIndex] = newPlayerId;
-
-    // Carry over the outgoing player's defensive position, if they had one.
-    const positions = { ...activeGame.defense.positions };
-    if (positions[outPlayerId]) {
-      positions[newPlayerId] = positions[outPlayerId];
-      delete positions[outPlayerId];
-    }
-
-    const substitutions = [
-      ...activeGame.substitutions,
-      { inning: activeGame.inning, half: activeGame.half, slotIndex, outPlayerId, inPlayerId: newPlayerId, ts: Date.now() },
-    ];
-
-    persistGame({ ...activeGame, lineup, defense: { ...activeGame.defense, positions }, substitutions });
-  };
-
-  /* ---------- pitching: balls / strikes / pitcher changes ---------- */
-  const archiveCurrentStint = (g) => {
-    const p = g.pitching;
-    if (!p.ourPitcherId) return p;
-    const outsRecorded = g.totalPitchingOuts - p.ourOutsAtStintStart;
-    if (outsRecorded === 0 && p.ourBalls === 0 && p.ourStrikes === 0 && p.ourEarnedRuns === 0) return p; // nothing to archive
-    return {
-      ...p,
-      ourHistory: [...p.ourHistory, { playerId: p.ourPitcherId, balls: p.ourBalls, strikes: p.ourStrikes, outsRecorded, earnedRuns: p.ourEarnedRuns }],
-    };
-  };
   const setOurPitcher = (playerId) => {
     if (!activeGame) return;
-    const archived = archiveCurrentStint(activeGame);
-    persistGame({
-      ...activeGame,
-      pitching: { ...archived, ourPitcherId: playerId, ourBalls: 0, ourStrikes: 0, ourEarnedRuns: 0, ourOutsAtStintStart: activeGame.totalPitchingOuts },
-    });
+    const prev = activeGame.pitching;
+    const history = prev.ourPitcherId && prev.ourCount > 0 ? [...prev.ourHistory, { playerId: prev.ourPitcherId, pitches: prev.ourCount }] : prev.ourHistory;
+    persistGame({ ...activeGame, pitching: { ...prev, ourPitcherId: playerId, ourCount: 0, ourHistory: history } });
+  };
+  const bumpOurPitchCount = (delta) => {
+    if (!activeGame) return;
+    const prev = activeGame.pitching;
+    persistGame({ ...activeGame, pitching: { ...prev, ourCount: Math.max(0, prev.ourCount + delta) } });
   };
   const setTheirPitcherName = (name) => {
     if (!activeGame) return;
     persistGame({ ...activeGame, pitching: { ...activeGame.pitching, theirName: name } });
   };
-
-  // Ties the pitch-count buttons to the current batter's live ball/strike count.
-  // side: 'our' (we're pitching, on defense) or 'their' (they're pitching, we're batting).
-  // On a 4th ball, auto-records a walk; on a 3rd strike, auto-records a strikeout.
-  const bumpPitchAndCount = (side, type, delta) => {
+  const bumpTheirPitchCount = (delta) => {
     if (!activeGame) return;
-    if (side === "our" && (usBatting || !activeGame.pitching.ourPitcherId)) return;
-    if (side === "their" && !usBatting) return;
-
-    const pKey = side === "our" ? (type === "ball" ? "ourBalls" : "ourStrikes") : (type === "ball" ? "theirBalls" : "theirStrikes");
-    const newPitching = { ...activeGame.pitching, [pKey]: Math.max(0, activeGame.pitching[pKey] + delta) };
-
-    if (delta > 0) {
-      const nextBalls = type === "ball" ? activeGame.count.balls + 1 : activeGame.count.balls;
-      const nextStrikes = type === "strike" ? activeGame.count.strikes + 1 : activeGame.count.strikes;
-
-      if (type === "ball" && nextBalls >= 4) {
-        if (side === "their") { recordOutcome("BB", newPitching); return; }
-        // side === 'our': opponent's batter walks — place them on 1st (forcing
-        // anyone already there ahead), even though we don't track their lineup.
-        const { bases } = placeDefenseRunner(activeGame.defenseBases, 1, crypto.randomUUID());
-        persistGame({ ...activeGame, pitching: newPitching, count: { balls: 0, strikes: 0 }, defenseBases: bases });
-        return;
-      }
-      if (type === "strike" && nextStrikes >= 3) {
-        if (side === "their") { recordOutcome("K", newPitching); return; }
-        defenseOut(newPitching);
-        return;
-      }
-      persistGame({ ...activeGame, pitching: newPitching, count: { balls: nextBalls, strikes: nextStrikes } });
-      return;
-    }
-
-    // delta < 0 (the "-1" undo buttons) — just back off the tally, no auto-triggers.
-    const nextCount = {
-      balls: type === "ball" ? Math.max(0, activeGame.count.balls + delta) : activeGame.count.balls,
-      strikes: type === "strike" ? Math.max(0, activeGame.count.strikes + delta) : activeGame.count.strikes,
-    };
-    persistGame({ ...activeGame, pitching: newPitching, count: nextCount });
+    const prev = activeGame.pitching;
+    persistGame({ ...activeGame, pitching: { ...prev, theirCount: Math.max(0, prev.theirCount + delta) } });
   };
 
   const endGame = () => {
     if (!activeGame) return;
-    const archived = archiveCurrentStint(activeGame);
-    persistGame({ ...activeGame, status: "final", pitching: archived });
+    const prev = activeGame.pitching;
+    const history = prev.ourPitcherId && prev.ourCount > 0 ? [...prev.ourHistory, { playerId: prev.ourPitcherId, pitches: prev.ourCount }] : prev.ourHistory;
+    const g = { ...activeGame, status: "final", pitching: { ...prev, ourHistory: history } };
+    persistGame(g);
     setView("summary");
   };
   const reopenGame = () => {
     if (!activeGame) return;
     persistGame({ ...activeGame, status: "live" });
-    setHistory([]);
     setView("live");
   };
   const updateGameMeta = (patch) => {
@@ -858,7 +497,7 @@ function Scorebook() {
         .map((pid) => players.find((p) => p.id === pid))
         .filter(Boolean)
         .map((p) => {
-          const s = statsForPlayerInGame(activeGame, p.id);
+          const s = computeStatsFromPlays(p.id, activeGame.plays, activeGame.scores);
           return `${p.name}: ${s.AB} AB, ${s.H} H, ${s.R} R, ${s.RBI} RBI, ${s.BB} BB, ${s.K} K`;
         })
         .join("\n");
@@ -928,27 +567,15 @@ function Scorebook() {
             scorekeeper={scorekeeper}
             addPlayer={addPlayer}
             removePlayer={removePlayer}
-            updateTeamColor={updateTeamColor}
-            updateTeamLogo={updateTeamLogo}
             openGame={openGame}
             deleteGame={deleteGame}
             goNewGame={() => setView("newgame")}
-            goAddOldGame={goAddOldGame}
             goSeason={() => setView("season")}
             goHome={() => setView("home")}
           />
         )}
         {view === "newgame" && (
           <NewGameView teams={teams} players={players} defaultTeamId={activeTeamId} onCancel={() => setView("team")} onStart={startGame} />
-        )}
-        {view === "oldgame" && (
-          <OldGameView
-            team={teams.find((t) => t.id === (activeGame ? activeGame.teamId : activeTeamId))}
-            players={players}
-            existingGame={activeGame && activeGame.source === "manual" ? activeGame : null}
-            onCancel={() => setView(activeGame && activeGame.source === "manual" ? "summary" : "team")}
-            onSave={saveOldGame}
-          />
         )}
         {view === "live" && activeGame && (
           <LiveGameView
@@ -964,21 +591,14 @@ function Scorebook() {
             defenseOut={defenseOut}
             theirRun={theirRun}
             skipHalf={skipHalf}
-            undoLastAction={undoLastAction}
-            canUndo={history.length > 0}
+            undoLast={undoLast}
             endGame={endGame}
-            selectedDefenseBase={selectedDefenseBase}
-            setSelectedDefenseBase={setSelectedDefenseBase}
-            toggleDefenseBase={toggleDefenseBase}
-            defenseBaseAction={defenseBaseAction}
-            recordDefenseHit={recordDefenseHit}
-            recordDefenseForcedBase={recordDefenseForcedBase}
             setPosition={setPosition}
             bumpFielding={bumpFielding}
-            substitutePlayer={substitutePlayer}
             setOurPitcher={setOurPitcher}
+            bumpOurPitchCount={bumpOurPitchCount}
             setTheirPitcherName={setTheirPitcherName}
-            bumpPitchAndCount={bumpPitchAndCount}
+            bumpTheirPitchCount={bumpTheirPitchCount}
             goHome={() => setView("home")}
           />
         )}
@@ -993,7 +613,6 @@ function Scorebook() {
             updateReport={(text) => persistGame({ ...activeGame, report: text })}
             updateGameMeta={updateGameMeta}
             reopenGame={reopenGame}
-            goEditOldGame={() => setView("oldgame")}
             deleteGame={async (id) => { await deleteGame(id); setView("home"); }}
             goHome={() => setView("home")}
           />
@@ -1057,21 +676,6 @@ function TopBar({ scorekeeper, setScorekeeper, setView }) {
   );
 }
 
-/* ---------------- TEAM BADGE (logo + color, reused across views) ---------------- */
-function TeamBadge({ team, size = 32 }) {
-  const color = (team && team.color) || C.amber;
-  if (team && team.logo) {
-    return <img src={team.logo} alt="" style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", border: `2px solid ${color}`, flexShrink: 0 }} />;
-  }
-  return (
-    <div style={{ width: size, height: size, borderRadius: "50%", background: color, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-      <span style={{ fontFamily: "Oswald, sans-serif", fontWeight: 700, fontSize: size * 0.42, color: C.ink }}>
-        {team && team.name ? team.name.trim()[0].toUpperCase() : "?"}
-      </span>
-    </div>
-  );
-}
-
 /* ---------------- HOME ---------------- */
 function HomeView({ teams, gameIndex, scorekeeper, addTeam, openTeam, openGame }) {
   const [newTeam, setNewTeam] = useState("");
@@ -1107,19 +711,11 @@ function HomeView({ teams, gameIndex, scorekeeper, addTeam, openTeam, openGame }
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, marginBottom: 20 }}>
         {teams.map((t) => {
           const tGames = gameIndex.filter((g) => g.teamId === t.id);
-          const record = teamRecord(t.id, gameIndex);
           return (
             <Card key={t.id} style={{ cursor: "pointer" }}>
-              <div onClick={() => openTeam(t.id)} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <TeamBadge team={t} />
-                <div>
-                  <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 20, color: C.chalk, fontWeight: 600 }}>{t.name}</div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
-                    <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 12, color: C.amber }}>{tGames.length} game{tGames.length !== 1 ? "s" : ""} logged</span>
-                    {record.played > 0 && <span style={{ color: C.chalkDim, fontSize: 11 }}>·</span>}
-                    <RecordBadge record={record} />
-                  </div>
-                </div>
+              <div onClick={() => openTeam(t.id)}>
+                <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 20, color: C.chalk, fontWeight: 600 }}>{t.name}</div>
+                <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 12, color: C.amber, marginTop: 4 }}>{tGames.length} game{tGames.length !== 1 ? "s" : ""} logged</div>
               </div>
             </Card>
           );
@@ -1140,86 +736,18 @@ function HomeView({ teams, gameIndex, scorekeeper, addTeam, openTeam, openGame }
 }
 
 /* ---------------- TEAM ---------------- */
-function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, updateTeamColor, updateTeamLogo, openGame, deleteGame, goNewGame, goAddOldGame, goSeason, goHome }) {
+function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, openGame, deleteGame, goNewGame, goSeason, goHome }) {
   const [name, setName] = useState("");
   const [num, setNum] = useState("");
-  const [uploading, setUploading] = useState(false);
   if (!team) return <div style={{ color: C.chalk }}>Team not found. <a onClick={goHome} style={{ color: C.amber, cursor: "pointer" }}>Go home</a></div>;
-
-  const onLogoFile = async (file) => {
-    if (!file) return;
-    if (file.size > 8 * 1024 * 1024) { alert("That image is too large — try one under 8MB."); return; }
-    setUploading(true);
-    try {
-      const dataUrl = await resizeImageFile(file, 200);
-      updateTeamLogo(team.id, dataUrl);
-    } catch (e) {
-      console.error(e);
-      alert("Couldn't process that image.");
-    }
-    setUploading(false);
-  };
-
   return (
     <div>
       <BackLink onClick={goHome}>All teams</BackLink>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "6px 0 16px", flexWrap: "wrap" }}>
-        <TeamBadge team={team} size={44} />
-        <h1 style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 30, margin: 0 }}>{team.name}</h1>
-        {teamRecord(team.id, games).played > 0 && (
-          <span style={{ background: `${C.amber}22`, border: `1px solid ${C.amber}55`, borderRadius: 20, padding: "4px 12px" }}>
-            <RecordBadge record={teamRecord(team.id, games)} size={14} />
-          </span>
-        )}
-      </div>
+      <h1 style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 30, margin: "6px 0 16px" }}>{team.name}</h1>
       <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
         {scorekeeper && <Btn tone="amber" onClick={goNewGame}>+ Start New Game</Btn>}
-        {scorekeeper && <Btn tone="ghost" onClick={goAddOldGame}>+ Add Old Game</Btn>}
         <Btn tone="ghost" onClick={goSeason}>View Season Stats</Btn>
       </div>
-
-      {scorekeeper && (
-        <>
-          <Eyebrow>Team colors & logo</Eyebrow>
-          <Card style={{ marginBottom: 20 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
-              <TeamBadge team={team} size={56} />
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <label style={{ display: "inline-block" }}>
-                  <span style={{ ...selStyle, display: "inline-block", cursor: "pointer", width: "auto", padding: "8px 14px" }}>
-                    {uploading ? "Processing…" : "Upload Logo"}
-                  </span>
-                  <input type="file" accept="image/*" onChange={(e) => onLogoFile(e.target.files[0])} style={{ display: "none" }} disabled={uploading} />
-                </label>
-                {team.logo && <Btn size="sm" tone="ghost" onClick={() => updateTeamLogo(team.id, null)}>Remove Logo</Btn>}
-              </div>
-            </div>
-            <div style={{ marginTop: 14 }}>
-              <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 11, letterSpacing: 1, color: C.chalkDim, marginBottom: 8, textTransform: "uppercase" }}>Team color</div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                {TEAM_COLORS.map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => updateTeamColor(team.id, c)}
-                    style={{
-                      width: 28, height: 28, borderRadius: "50%", background: c, cursor: "pointer",
-                      border: team.color === c ? `3px solid ${C.chalk}` : "2px solid transparent",
-                    }}
-                  />
-                ))}
-                <input
-                  type="color"
-                  value={team.color || "#E8A33D"}
-                  onChange={(e) => updateTeamColor(team.id, e.target.value)}
-                  style={{ width: 34, height: 28, padding: 0, border: `1px solid ${C.line}`, borderRadius: 6, background: "none", cursor: "pointer" }}
-                  title="Custom color"
-                />
-              </div>
-            </div>
-          </Card>
-        </>
-      )}
-
       <Eyebrow>Roster ({players.length})</Eyebrow>
       <Card style={{ marginBottom: 20 }}>
         {players.length === 0 && <p style={{ color: C.chalkDim, margin: 0 }}>No players yet.</p>}
@@ -1243,10 +771,7 @@ function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, 
         {games.map((g) => (
           <div key={g.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${C.line}22`, gap: 10 }}>
             <div onClick={() => openGame(g.id)} style={{ cursor: "pointer", flex: 1 }}>
-              <div style={{ color: C.chalk, fontFamily: "Oswald, sans-serif", fontWeight: 500 }}>
-                vs {g.opponent}
-                {g.source === "manual" && <span style={{ fontSize: 10, color: C.chalkDim, fontFamily: "IBM Plex Mono, monospace", marginLeft: 8, border: `1px solid ${C.line}`, borderRadius: 8, padding: "1px 6px" }}>MANUAL</span>}
-              </div>
+              <div style={{ color: C.chalk, fontFamily: "Oswald, sans-serif", fontWeight: 500 }}>vs {g.opponent}</div>
               <div style={{ color: C.chalkDim, fontSize: 12, fontFamily: "IBM Plex Mono, monospace" }}>{g.date}</div>
             </div>
             <div onClick={() => openGame(g.id)} style={{ cursor: "pointer", textAlign: "right" }}>
@@ -1327,109 +852,6 @@ function NewGameView({ teams, players, defaultTeamId, onCancel, onStart }) {
     </div>
   );
 }
-
-/* ---------------- OLD GAME (manual box-score entry) ---------------- */
-const MANUAL_STAT_FIELDS = ["AB", "R", "H", "2B", "3B", "HR", "RBI", "BB", "HBP", "K", "SF"];
-function OldGameView({ team, players, existingGame, onCancel, onSave }) {
-  const isEdit = !!existingGame;
-  const teamPlayers = team ? players.filter((p) => p.teamId === team.id) : [];
-  const [opponent, setOpponent] = useState(existingGame ? existingGame.opponent : "");
-  const [date, setDate] = useState(existingGame ? existingGame.date : new Date().toISOString().slice(0, 10));
-  const [ourScore, setOurScore] = useState(existingGame ? existingGame.ourScore : 0);
-  const [theirScore, setTheirScore] = useState(existingGame ? existingGame.theirScore : 0);
-  const [selected, setSelected] = useState(existingGame ? existingGame.lineup : []);
-  const [stats, setStats] = useState(existingGame ? existingGame.manualStats : {});
-
-  if (!team) return <div style={{ color: C.chalk }}>Team not found. <a onClick={onCancel} style={{ color: C.amber, cursor: "pointer" }}>Go back</a></div>;
-
-  const toggle = (id) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
-  const setStat = (pid, field, value) => {
-    const n = Math.max(0, parseInt(value, 10) || 0);
-    setStats((s) => ({ ...s, [pid]: { ...(s[pid] || {}), [field]: n } }));
-  };
-
-  const save = () => {
-    const cleanStats = {};
-    selected.forEach((pid) => {
-      const row = stats[pid] || {};
-      const clean = {};
-      MANUAL_STAT_FIELDS.forEach((f) => { clean[f] = row[f] || 0; });
-      cleanStats[pid] = clean;
-    });
-    onSave({ opponent: opponent.trim(), date, ourScore: Number(ourScore) || 0, theirScore: Number(theirScore) || 0, lineup: selected, manualStats: cleanStats });
-  };
-
-  return (
-    <div>
-      <BackLink onClick={onCancel}>Cancel</BackLink>
-      <h1 style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 30, margin: "6px 0 16px" }}>{isEdit ? "Edit Old Game" : "Add Old Game"}</h1>
-      <p style={{ color: C.chalkDim, fontSize: 13, marginTop: -10, marginBottom: 16, maxWidth: 560 }}>
-        For a game you didn't track live in Scorebook — enter the final score and each player's stat line. It's saved as a finished game and folds right into season stats alongside your live-tracked games.
-      </p>
-
-      <Card style={{ marginBottom: 16 }}>
-        <Field label="Opponent"><input value={opponent} onChange={(e) => setOpponent(e.target.value)} placeholder="Opponent team name" style={selStyle} /></Field>
-        <Field label="Date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={selStyle} /></Field>
-        <div style={{ display: "flex", gap: 10 }}>
-          <Field label="Our score"><input type="number" value={ourScore} onChange={(e) => setOurScore(e.target.value)} style={selStyle} /></Field>
-          <Field label="Their score"><input type="number" value={theirScore} onChange={(e) => setTheirScore(e.target.value)} style={selStyle} /></Field>
-        </div>
-      </Card>
-
-      <Eyebrow>Players in this game — tap to include, then fill in their line</Eyebrow>
-      <Card style={{ marginBottom: 16 }}>
-        {teamPlayers.length === 0 && <p style={{ color: C.chalkDim }}>Add players to this team's roster first.</p>}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: selected.length ? 14 : 0 }}>
-          {teamPlayers.map((p) => (
-            <button
-              key={p.id}
-              onClick={() => toggle(p.id)}
-              style={{ padding: "8px 12px", borderRadius: 8, border: `1px solid ${selected.includes(p.id) ? C.amber : C.line}`, background: selected.includes(p.id) ? C.amber : "transparent", color: selected.includes(p.id) ? C.ink : C.chalk, fontWeight: 600, cursor: "pointer" }}
-            >
-              #{p.number || "—"} {p.name}
-            </button>
-          ))}
-        </div>
-        {selected.length > 0 && (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 12, minWidth: 640 }}>
-              <thead>
-                <tr style={{ color: C.amber, textAlign: "left" }}>
-                  <th style={{ padding: "4px 8px", position: "sticky", left: 0, background: C.greenLight }}>Player</th>
-                  {MANUAL_STAT_FIELDS.map((f) => <th key={f} style={{ padding: "4px 6px", textAlign: "center" }}>{f}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {selected.map((pid) => {
-                  const p = teamPlayers.find((x) => x.id === pid);
-                  const row = stats[pid] || {};
-                  return (
-                    <tr key={pid}>
-                      <td style={{ padding: "4px 8px", color: C.chalk, position: "sticky", left: 0, background: C.greenLight, whiteSpace: "nowrap" }}>{p ? p.name : "—"}</td>
-                      {MANUAL_STAT_FIELDS.map((f) => (
-                        <td key={f} style={{ padding: "3px" }}>
-                          <input
-                            type="number"
-                            min="0"
-                            value={row[f] || 0}
-                            onChange={(e) => setStat(pid, f, e.target.value)}
-                            style={{ width: 44, padding: "5px 4px", borderRadius: 6, border: `1px solid ${C.line}`, background: C.chalk, color: C.ink, textAlign: "center" }}
-                          />
-                        </td>
-                      ))}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
-
-      <Btn tone="amber" size="lg" disabled={!opponent.trim() || selected.length === 0} onClick={save}>{isEdit ? "Save Changes" : "Add Game"}</Btn>
-    </div>
-  );
-}
 const selStyle = { width: "100%", padding: "10px 12px", borderRadius: 8, border: `1px solid ${C.line}`, background: C.chalk, color: C.ink };
 const arrowStyle = { background: "none", border: `1px solid ${C.line}`, color: C.chalkDim, borderRadius: 6, width: 26, height: 26, cursor: "pointer" };
 function Field({ label, children }) {
@@ -1469,155 +891,12 @@ function BattingPreview({ lineup, players, currentBatterIndex }) {
   );
 }
 
-/* ---------------- SUBSTITUTIONS ---------------- */
-function SubstitutionsPanel({ game, team, players, substitutePlayer }) {
-  const [open, setOpen] = useState(false);
-  const bench = team ? players.filter((p) => p.teamId === team.id && !game.lineup.includes(p.id)) : [];
-
-  return (
-    <Card style={{ marginBottom: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: open ? 12 : 0 }}>
-        <Eyebrow>Substitutions{game.substitutions.length > 0 ? ` (${game.substitutions.length})` : ""}</Eyebrow>
-        <Btn size="sm" tone="ghost" onClick={() => setOpen((o) => !o)}>{open ? "Close" : "Make a Sub"}</Btn>
-      </div>
-      {open && (
-        <>
-          {bench.length === 0 && <p style={{ color: C.chalkDim, fontSize: 13, margin: "0 0 10px" }}>No bench players available — everyone on the roster is already in the lineup.</p>}
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: game.substitutions.length > 0 ? 14 : 0 }}>
-            {game.lineup.map((pid, i) => {
-              const p = players.find((x) => x.id === pid);
-              return (
-                <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, width: 22 }}>{i + 1}.</span>
-                  <span style={{ color: C.chalk, fontSize: 13, minWidth: 110 }}>{p ? p.name : "—"}</span>
-                  {bench.length > 0 && (
-                    <select
-                      value=""
-                      onChange={(e) => { if (e.target.value) substitutePlayer(i, e.target.value); }}
-                      style={{ ...selStyle, width: "auto", flex: "1 1 160px", padding: "5px 8px", fontSize: 12 }}
-                    >
-                      <option value="">Sub in…</option>
-                      {bench.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-                    </select>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          {game.substitutions.length > 0 && (
-            <div style={{ borderTop: `1px solid ${C.line}22`, paddingTop: 10 }}>
-              <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1, marginBottom: 6 }}>SUBSTITUTION LOG</div>
-              {game.substitutions.map((s, i) => {
-                const inP = players.find((x) => x.id === s.inPlayerId);
-                const outP = players.find((x) => x.id === s.outPlayerId);
-                return (
-                  <div key={i} style={{ fontSize: 12, color: C.chalkDim, fontFamily: "IBM Plex Mono, monospace" }}>
-                    {s.half === "top" ? "T" : "B"}{s.inning} — {inP ? inP.name : "?"} in for {outP ? outP.name : "?"} (slot {s.slotIndex + 1})
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </>
-      )}
-    </Card>
-  );
-}
-
-/* ---------------- BALL-STRIKE COUNTER (shared by offense/defense) ---------------- */
-function PitchCounter({ title, pitcherControl, balls, strikes, onBall, onStrike, disabled, onUndo, canUndo }) {
-  const pitches = balls + strikes;
-  const pct = pitches > 0 ? Math.round((strikes / pitches) * 100) : 0;
-  return (
-    <Card style={{ marginBottom: 16 }}>
-      <Eyebrow>{title}</Eyebrow>
-      {pitcherControl && <div style={{ marginBottom: 10 }}>{pitcherControl}</div>}
-      <div style={{ fontSize: 11, color: C.chalkDim, marginBottom: 10 }}>Tap here for every pitch — it updates the live count above and this pitcher's game totals together.</div>
-      <div style={{ display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
-        <div style={{ textAlign: "center" }}>
-          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>BALLS</div>
-          <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 26, color: C.chalk, fontWeight: 700 }}>{balls}</div>
-          <Btn size="sm" onClick={onBall} disabled={disabled}>+1 Ball</Btn>
-        </div>
-        <div style={{ textAlign: "center" }}>
-          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>STRIKES</div>
-          <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 26, color: C.chalk, fontWeight: 700 }}>{strikes}</div>
-          <Btn size="sm" tone="amber" onClick={onStrike} disabled={disabled}>+1 Strike</Btn>
-        </div>
-        <div style={{ textAlign: "center", marginLeft: "auto" }}>
-          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>PITCHES / STRIKE%</div>
-          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 18, color: C.amber, fontWeight: 700 }}>{pitches} · {pct}%</div>
-        </div>
-      </div>
-      {onUndo && (
-        <div style={{ marginTop: 12 }}>
-          <Btn size="sm" tone="ghost" onClick={onUndo} disabled={!canUndo}>Undo Last Pitch</Btn>
-        </div>
-      )}
-    </Card>
-  );
-}
-
-/* ---------------- LIVE / FINAL BOX SCORE (shared) ---------------- */
-function BoxScoreTable({ game, players }) {
-  // Anyone who ever batted (via plays, or has a manual stat line) should stay
-  // on the box score even if a substitution later moved them out of their
-  // lineup slot — otherwise their stats would silently vanish from the table.
-  const seen = new Set();
-  const order = [];
-  (game.lineup || []).forEach((id) => { if (!seen.has(id)) { seen.add(id); order.push(id); } });
-  (game.plays || []).forEach((p) => { if (!seen.has(p.playerId)) { seen.add(p.playerId); order.push(p.playerId); } });
-  Object.keys(game.manualStats || {}).forEach((id) => { if (!seen.has(id)) { seen.add(id); order.push(id); } });
-  const rows = order.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: statsForPlayerInGame(game, p.id) }));
-  return (
-    <div style={{ overflowX: "auto" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 13 }}>
-        <thead><tr style={{ color: C.amber, textAlign: "left" }}>{["Player", "AB", "R", "H", "RBI", "BB", "K", "AVG"].map((h) => <th key={h} style={{ padding: "4px 8px", borderBottom: `1px solid ${C.line}55` }}>{h}</th>)}</tr></thead>
-        <tbody>{rows.map(({ p, s }) => (
-          <tr key={p.id} style={{ color: C.chalk }}>
-            <td style={{ padding: "4px 8px" }}>{p.name}</td><td style={{ padding: "4px 8px" }}>{s.AB}</td><td style={{ padding: "4px 8px" }}>{s.R}</td>
-            <td style={{ padding: "4px 8px" }}>{s.H}</td><td style={{ padding: "4px 8px" }}>{s.RBI}</td><td style={{ padding: "4px 8px" }}>{s.BB}</td>
-            <td style={{ padding: "4px 8px" }}>{s.K}</td><td style={{ padding: "4px 8px" }}>{fmt3(s.AVG)}</td>
-          </tr>
-        ))}</tbody>
-      </table>
-    </div>
-  );
-}
-function PitchingLineDisplay({ game, players }) {
-  const p = game.pitching;
-  const stints = [...p.ourHistory];
-  if (p.ourPitcherId) stints.push({ playerId: p.ourPitcherId, balls: p.ourBalls, strikes: p.ourStrikes, outsRecorded: game.totalPitchingOuts - p.ourOutsAtStintStart, earnedRuns: p.ourEarnedRuns });
-  const byPlayer = {};
-  stints.forEach((s) => {
-    byPlayer[s.playerId] = byPlayer[s.playerId] || [];
-    byPlayer[s.playerId].push(s);
-  });
-  const names = Object.keys(byPlayer);
-  if (names.length === 0) return null;
-  return (
-    <div style={{ marginTop: 12 }}>
-      <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1, marginBottom: 4 }}>PITCHING</div>
-      {names.map((pid) => {
-        const player = players.find((x) => x.id === pid);
-        const line = pitchingLine(byPlayer[pid]);
-        return (
-          <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>
-            {player ? player.name : "?"} — {ipDisplay(line.outs)} IP, {line.er} ER, ERA {line.era.toFixed(2)}, {line.strikePct.toFixed(0)}% strikes ({line.strikes}/{line.pitches})
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 /* ---------------- LIVE GAME ---------------- */
 function LiveGameView(props) {
   const {
     game, team, players, usBatting, scorekeeper, selectedBase,
-    recordOutcome, tapBase, runnerAction, defenseOut, theirRun, skipHalf, undoLastAction, canUndo, endGame,
-    selectedDefenseBase, setSelectedDefenseBase, toggleDefenseBase, defenseBaseAction, recordDefenseHit, recordDefenseForcedBase,
-    setPosition, bumpFielding, substitutePlayer, setOurPitcher, setTheirPitcherName, bumpPitchAndCount,
+    recordOutcome, tapBase, runnerAction, defenseOut, theirRun, skipHalf, undoLast, endGame,
+    setPosition, bumpFielding, setOurPitcher, bumpOurPitchCount, setTheirPitcherName, bumpTheirPitchCount,
     goHome,
   } = props;
   const batter = players.find((p) => p.id === game.lineup[game.currentBatterIndex % game.lineup.length]);
@@ -1630,25 +909,6 @@ function LiveGameView(props) {
   const defensivePlayers = game.lineup.map((id) => players.find((p) => p.id === id)).filter(Boolean);
   const ourPitcher = players.find((p) => p.id === game.pitching.ourPitcherId);
 
-  // Field animation state — purely cosmetic, not persisted.
-  const [pitchTrigger, setPitchTrigger] = useState(0);
-  const [flight, setFlight] = useState(null);
-  const [pendingOutcome, setPendingOutcome] = useState(null); // { side: 'offense'|'defense', key }
-
-  const runners = usBatting
-    ? [1, 2, 3].filter((n) => game.bases[n]).map((n) => ({ key: game.bases[n], base: n, label: baseNames[n] }))
-    : [1, 2, 3].filter((n) => game.defenseBases[n]).map((n) => ({ key: game.defenseBases[n], base: n, label: null }));
-
-  const throwPitch = (fn) => { setPitchTrigger((k) => k + 1); fn(); };
-  const beginLocationPick = (side, key) => setPendingOutcome({ side, key });
-  const commitLocation = (zone) => {
-    if (!pendingOutcome) return;
-    if (zone) setFlight({ key: Date.now(), x: FIELD_ZONES[zone][0], y: FIELD_ZONES[zone][1] });
-    if (pendingOutcome.side === "offense") recordOutcome(pendingOutcome.key, undefined, zone);
-    else recordDefenseHit(pendingOutcome.key);
-    setPendingOutcome(null);
-  };
-
   return (
     <div>
       <BackLink onClick={goHome}>Home</BackLink>
@@ -1658,37 +918,8 @@ function LiveGameView(props) {
         <div>
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16 }}>
             <Card style={{ flex: "0 0 auto" }}>
-              <GameField runners={runners} hasBatter={usBatting} pitchTrigger={pitchTrigger} flight={flight} />
-              <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 10 }}>
-                <div style={{ textAlign: "center" }}>
-                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>COUNT</div>
-                  <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 28, fontWeight: 700, color: C.amber }}>{game.count.balls}-{game.count.strikes}</div>
-                </div>
-                <div style={{ width: 1, background: `${C.line}55` }} />
-                <div style={{ textAlign: "center" }}>
-                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>OUTS</div>
-                  <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 28, fontWeight: 700, color: C.chalk }}>{game.outs}<span style={{ fontSize: 16, color: C.chalkDim }}>/3</span></div>
-                </div>
-              </div>
-              {pendingOutcome && (
-                <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.line}22` }}>
-                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 11, color: C.amber, letterSpacing: 1, marginBottom: 8, textAlign: "center" }}>WHERE'D IT GO?</div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, justifyContent: "center" }}>
-                    {Object.keys(FIELD_ZONES).map((z) => (
-                      <button
-                        key={z}
-                        onClick={() => commitLocation(z)}
-                        style={{ fontSize: 11, padding: "6px 10px", borderRadius: 12, border: `1px solid ${C.amber}`, background: "transparent", color: C.amber, cursor: "pointer", fontWeight: 600 }}
-                      >
-                        {FIELD_ZONE_LABELS[z]}
-                      </button>
-                    ))}
-                    <button onClick={() => commitLocation(null)} style={{ fontSize: 11, padding: "6px 10px", borderRadius: 12, border: `1px solid ${C.line}`, background: "transparent", color: C.chalkDim, cursor: "pointer" }}>
-                      Skip
-                    </button>
-                  </div>
-                </div>
-              )}
+              <Diamond bases={game.bases} names={baseNames} />
+              <div style={{ fontFamily: "IBM Plex Mono, monospace", color: C.chalkDim, fontSize: 11, marginTop: 6, textAlign: "center" }}>Outs: <span style={{ color: C.amber, fontWeight: 700 }}>{game.outs}</span> / 3</div>
             </Card>
 
             {selectedBase != null && scorekeeper && (
@@ -1703,7 +934,6 @@ function LiveGameView(props) {
               </Card>
             )}
           </div>
-
           {scorekeeper && [1, 2, 3].some((n) => game.bases[n]) && (
             <div style={{ marginTop: -8, marginBottom: 16 }}>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -1733,36 +963,33 @@ function LiveGameView(props) {
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(80px, 1fr))", gap: 8 }}>
                 {OUTCOMES.map((o) => (
-                  <button key={o.key} title={o.full} onClick={() => (["1B", "2B", "3B", "HR"].includes(o.key) ? beginLocationPick("offense", o.key) : recordOutcome(o.key))} style={{ padding: "14px 6px", borderRadius: 10, border: `1px solid ${C.line}55`, background: o.out ? C.navy : o.hit ? C.amber : C.dirt, color: o.out ? C.chalk : o.hit ? C.ink : C.chalk, fontFamily: "IBM Plex Mono, monospace", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
+                  <button key={o.key} title={o.full} onClick={() => recordOutcome(o.key)} style={{ padding: "14px 6px", borderRadius: 10, border: `1px solid ${C.line}55`, background: o.out ? C.navy : o.hit ? C.amber : C.dirt, color: o.out ? C.chalk : o.hit ? C.ink : C.chalk, fontFamily: "IBM Plex Mono, monospace", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
                     {o.label}
                   </button>
                 ))}
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
-                <Btn tone="ghost" size="sm" onClick={undoLastAction} disabled={!canUndo}>Undo Last Play</Btn>
+                <Btn tone="ghost" size="sm" onClick={undoLast} disabled={game.plays.length === 0}>Undo Last Play</Btn>
                 <Btn tone="ghost" size="sm" onClick={skipHalf}>Skip to Next Half-Inning</Btn>
               </div>
             </Card>
           )}
 
           {scorekeeper && usBatting && (
-            <PitchCounter
-              title={`Their pitcher${game.pitching.theirName ? " — " + game.pitching.theirName : ""}`}
-              pitcherControl={
+            <Card style={{ marginBottom: 16 }}>
+              <Eyebrow>Their pitcher (pitch count)</Eyebrow>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 <input
                   value={game.pitching.theirName}
                   onChange={(e) => setTheirPitcherName(e.target.value)}
                   placeholder="Pitcher name / number"
-                  style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: `1px solid ${C.line}`, background: C.chalk, color: C.ink, fontSize: 13 }}
+                  style={{ flex: "1 1 160px", padding: "8px 10px", borderRadius: 8, border: `1px solid ${C.line}`, background: C.chalk, color: C.ink, fontSize: 13 }}
                 />
-              }
-              balls={game.pitching.theirBalls}
-              strikes={game.pitching.theirStrikes}
-              onBall={() => throwPitch(() => bumpPitchAndCount("their", "ball", 1))}
-              onStrike={() => throwPitch(() => bumpPitchAndCount("their", "strike", 1))}
-              onUndo={undoLastAction}
-              canUndo={canUndo}
-            />
+                <span style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, fontSize: 20, fontWeight: 700, minWidth: 30, textAlign: "center" }}>{game.pitching.theirCount}</span>
+                <Btn size="sm" onClick={() => bumpTheirPitchCount(1)}>+1 Pitch</Btn>
+                <Btn size="sm" tone="ghost" onClick={() => bumpTheirPitchCount(-1)}>-1</Btn>
+              </div>
+            </Card>
           )}
 
           {scorekeeper && !usBatting && (
@@ -1770,73 +997,26 @@ function LiveGameView(props) {
               <Card style={{ marginBottom: 16 }}>
                 <Eyebrow>On defense — {game.opponent} batting</Eyebrow>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  <Btn onClick={() => defenseOut()} style={{ background: C.navy }}>Record Out</Btn>
-                  <Btn tone="amber" onClick={() => theirRun(1, true)}>+1 Run (Earned)</Btn>
-                  <Btn tone="dirt" onClick={() => theirRun(1, false)}>+1 Run (Unearned)</Btn>
-                  <Btn tone="ghost" size="sm" onClick={() => theirRun(-1, false)}>-1 Run</Btn>
+                  <Btn onClick={defenseOut} style={{ background: C.navy }}>Record Out</Btn>
+                  <Btn tone="amber" onClick={() => theirRun(1)}>+1 Run ({game.opponent})</Btn>
+                  <Btn tone="ghost" size="sm" onClick={() => theirRun(-1)}>-1 Run</Btn>
                   <Btn tone="ghost" size="sm" onClick={skipHalf}>Skip to Next Half-Inning</Btn>
-                  <Btn tone="ghost" size="sm" onClick={undoLastAction} disabled={!canUndo}>Undo Last Play</Btn>
                 </div>
               </Card>
 
               <Card style={{ marginBottom: 16 }}>
-                <Eyebrow>Their baserunners</Eyebrow>
-                <div style={{ fontSize: 12, color: C.chalkDim, marginBottom: 10 }}>No roster for the other team, so these are just tracked by base — tap an empty base when a runner reaches it.</div>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
-                  {[1, 2, 3].map((n) => (
-                    <button
-                      key={n}
-                      onClick={() => (game.defenseBases[n] ? setSelectedDefenseBase(n) : toggleDefenseBase(n))}
-                      style={{
-                        fontSize: 13, padding: "8px 14px", borderRadius: 14, border: `1px solid ${C.amber}`,
-                        background: game.defenseBases[n] ? C.amber : "transparent",
-                        color: game.defenseBases[n] ? C.ink : C.amber,
-                        fontWeight: 600, cursor: "pointer",
-                      }}
-                    >
-                      {n === 1 ? "1st" : n === 2 ? "2nd" : "3rd"}{game.defenseBases[n] ? " · runner" : ""}
-                    </button>
-                  ))}
+                <Eyebrow>Our pitcher</Eyebrow>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+                  <select value={game.pitching.ourPitcherId || ""} onChange={(e) => setOurPitcher(e.target.value || null)} style={{ ...selStyle, width: "auto", flex: "1 1 160px" }}>
+                    <option value="">Select pitcher…</option>
+                    {defensivePlayers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                  <span style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, fontSize: 20, fontWeight: 700, minWidth: 30, textAlign: "center" }}>{game.pitching.ourCount}</span>
+                  <Btn size="sm" onClick={() => bumpOurPitchCount(1)} disabled={!game.pitching.ourPitcherId}>+1 Pitch</Btn>
+                  <Btn size="sm" tone="ghost" onClick={() => bumpOurPitchCount(-1)} disabled={!game.pitching.ourPitcherId}>-1</Btn>
                 </div>
-                {selectedDefenseBase != null && (
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, paddingTop: 8, borderTop: `1px solid ${C.line}22` }}>
-                    {selectedDefenseBase < 3 && <Btn size="sm" onClick={() => defenseBaseAction(selectedDefenseBase, "advance")}>Advance 1 Base</Btn>}
-                    <Btn size="sm" tone="amber" onClick={() => defenseBaseAction(selectedDefenseBase, "score-earned")}>Scores (Earned)</Btn>
-                    <Btn size="sm" tone="dirt" onClick={() => defenseBaseAction(selectedDefenseBase, "score-unearned")}>Scores (Unearned)</Btn>
-                    <Btn size="sm" tone="red" onClick={() => defenseBaseAction(selectedDefenseBase, "out")}>Out on Bases</Btn>
-                    <Btn size="sm" tone="ghost" onClick={() => setSelectedDefenseBase(null)}>Close</Btn>
-                  </div>
-                )}
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.line}22` }}>
-                  <span style={{ fontSize: 12, color: C.chalkDim, alignSelf: "center", marginRight: 4 }}>Their batter reached on a:</span>
-                  <Btn size="sm" tone="dirt" onClick={() => beginLocationPick("defense", 1)}>Single</Btn>
-                  <Btn size="sm" tone="dirt" onClick={() => beginLocationPick("defense", 2)}>Double</Btn>
-                  <Btn size="sm" tone="dirt" onClick={() => beginLocationPick("defense", 3)}>Triple</Btn>
-                  <Btn size="sm" tone="amber" onClick={() => beginLocationPick("defense", 4)}>Home Run</Btn>
-                  <Btn size="sm" tone="dirt" onClick={recordDefenseForcedBase} style={{ background: C.navy }}>HBP</Btn>
-                  <Btn size="sm" tone="red" onClick={recordDefenseForcedBase}>Error</Btn>
-                </div>
+                {ourPitcher && <div style={{ fontSize: 12, color: C.chalkDim, fontFamily: "IBM Plex Mono, monospace" }}>Now pitching: {ourPitcher.name}</div>}
               </Card>
-
-              <PitchCounter
-                title="Our pitcher"
-                pitcherControl={
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                    <select value={game.pitching.ourPitcherId || ""} onChange={(e) => setOurPitcher(e.target.value || null)} style={{ ...selStyle, width: "auto", flex: "1 1 160px" }}>
-                      <option value="">Select pitcher…</option>
-                      {defensivePlayers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                    </select>
-                    {ourPitcher && <span style={{ fontSize: 12, color: C.chalkDim, fontFamily: "IBM Plex Mono, monospace" }}>Now pitching: {ourPitcher.name}</span>}
-                  </div>
-                }
-                balls={game.pitching.ourBalls}
-                strikes={game.pitching.ourStrikes}
-                onBall={() => throwPitch(() => bumpPitchAndCount("our", "ball", 1))}
-                onStrike={() => throwPitch(() => bumpPitchAndCount("our", "strike", 1))}
-                disabled={!game.pitching.ourPitcherId}
-                onUndo={undoLastAction}
-                canUndo={canUndo}
-              />
 
               <Card style={{ marginBottom: 16 }}>
                 <Eyebrow>Defensive positions & fielding</Eyebrow>
@@ -1865,16 +1045,6 @@ function LiveGameView(props) {
             </>
           )}
 
-          {scorekeeper && (
-            <SubstitutionsPanel game={game} team={team} players={players} substitutePlayer={substitutePlayer} />
-          )}
-
-          <Eyebrow>Live box score — {team ? team.name : "Us"}</Eyebrow>
-          <Card style={{ marginBottom: 16 }}>
-            <BoxScoreTable game={game} players={players} />
-            <PitchingLineDisplay game={game} players={players} />
-          </Card>
-
           {scorekeeper && <Btn tone="red" size="lg" onClick={endGame}>End Game & Build Recap</Btn>}
         </div>
 
@@ -1900,70 +1070,36 @@ function LiveGameView(props) {
 }
 const miniBtn = { background: "none", border: `1px solid ${C.line}`, color: C.chalkDim, borderRadius: 4, width: 18, height: 18, cursor: "pointer", fontSize: 12, lineHeight: 1, padding: 0 };
 
-function BatIcon({ color }) {
-  return (
-    <svg width="20" height="20" viewBox="0 0 24 24" style={{ flexShrink: 0 }}>
-      <g transform="rotate(-40 12 12)">
-        <rect x="10.5" y="2" width="3" height="12" rx="1.5" fill={color || C.amber} />
-        <rect x="10" y="13" width="4" height="9" rx="2" fill={C.dirt} />
-      </g>
-    </svg>
-  );
-}
-
-/* ---------------- BIG-PRINT SCOREBOARD ---------------- */
 function ScoreHeader({ game, team }) {
-  const ourName = team ? team.name : "Us";
-  const isFinal = game.status === "final";
-  const usBatting = !isFinal && (game.isHome ? game.half === "bottom" : game.half === "top");
-  const accent = (team && team.color) || C.amber;
   return (
     <Card style={{ marginBottom: 16, background: C.navy, border: "none" }}>
-      <div
-        style={{
-          display: "inline-block",
-          background: isFinal ? C.red : accent,
-          color: isFinal ? C.chalk : C.ink,
-          borderRadius: 8,
-          padding: "6px 16px",
-          fontFamily: "Oswald, sans-serif",
-          fontWeight: 700,
-          fontSize: 26,
-          letterSpacing: 1,
-          marginBottom: 14,
-        }}
-      >
-        {isFinal ? "FINAL" : `${game.half === "top" ? "▲ TOP" : "▼ BOT"} ${game.inning}`}
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {[{ name: ourName, score: game.ourScore, batting: usBatting, us: true }, { name: game.opponent, score: game.theirScore, batting: !usBatting, us: false }].map((row, i) => (
-          <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
-              {row.us && <TeamBadge team={team} size={26} />}
-              {row.batting && <BatIcon color={row.us ? accent : undefined} />}
-              <div style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 20, fontWeight: 500, minWidth: 0, wordBreak: "break-word", lineHeight: 1.2 }}>
-                {row.name}
-              </div>
-            </div>
-            <div style={{ fontFamily: "IBM Plex Mono, monospace", color: C.chalk, fontSize: 40, fontWeight: 800, minWidth: 56, textAlign: "right" }}>
-              {row.score}
-            </div>
-          </div>
-        ))}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, fontSize: 12, letterSpacing: 1 }}>{game.half === "top" ? "TOP" : "BOT"} {game.inning}</div>
+          <div style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 18 }}>{team ? team.name : "Us"} vs {game.opponent}</div>
+        </div>
+        <div style={{ display: "flex", gap: 20, fontFamily: "IBM Plex Mono, monospace" }}>
+          <div style={{ textAlign: "center" }}><div style={{ color: C.chalkDim, fontSize: 11 }}>{team ? team.name.slice(0, 10) : "US"}</div><div style={{ color: C.chalk, fontSize: 30, fontWeight: 700 }}>{game.ourScore}</div></div>
+          <div style={{ textAlign: "center" }}><div style={{ color: C.chalkDim, fontSize: 11 }}>{game.opponent.slice(0, 10)}</div><div style={{ color: C.chalk, fontSize: 30, fontWeight: 700 }}>{game.theirScore}</div></div>
+        </div>
       </div>
     </Card>
   );
 }
 
 /* ---------------- SUMMARY ---------------- */
-function SummaryView({ game, team, players, scorekeeper, generating, generateRecap, updateReport, updateGameMeta, reopenGame, goEditOldGame, deleteGame, goHome }) {
+function SummaryView({ game, team, players, scorekeeper, generating, generateRecap, updateReport, updateGameMeta, reopenGame, deleteGame, goHome }) {
+  const rows = game.lineup.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: computeStatsFromPlays(p.id, game.plays, game.scores) }));
   const [editing, setEditing] = useState(false);
   const [opponent, setOpponent] = useState(game.opponent);
   const [date, setDate] = useState(game.date);
   const [ourScore, setOurScore] = useState(game.ourScore);
   const [theirScore, setTheirScore] = useState(game.theirScore);
 
-  const rows = game.lineup.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: statsForPlayerInGame(game, p.id) }));
+  const pitchers = [
+    ...game.pitching.ourHistory,
+    ...(game.pitching.ourPitcherId ? [{ playerId: game.pitching.ourPitcherId, pitches: game.pitching.ourCount }] : []),
+  ];
 
   const emailHref = () => {
     const subject = encodeURIComponent(`${team ? team.name : "Game"} vs ${game.opponent} — ${game.date}`);
@@ -1992,11 +1128,7 @@ function SummaryView({ game, team, players, scorekeeper, generating, generateRec
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <Btn tone="amber" size="sm" onClick={() => { updateGameMeta({ opponent, date, ourScore, theirScore }); setEditing(false); }}>Save Changes</Btn>
-                {game.source === "manual" ? (
-                  <Btn tone="ghost" size="sm" onClick={goEditOldGame}>Edit Stats</Btn>
-                ) : (
-                  <Btn tone="ghost" size="sm" onClick={reopenGame}>Reopen Game (Fix Plays)</Btn>
-                )}
+                <Btn tone="ghost" size="sm" onClick={reopenGame}>Reopen Game (Fix Plays)</Btn>
                 <Btn tone="red" size="sm" onClick={() => { if (window.confirm(`Delete this game vs ${game.opponent}? This can't be undone.`)) deleteGame(game.id); }}>Delete Game</Btn>
               </div>
             </>
@@ -2005,40 +1137,34 @@ function SummaryView({ game, team, players, scorekeeper, generating, generateRec
       )}
 
       <Eyebrow>Final Box Score</Eyebrow>
-      <Card style={{ marginBottom: 16 }}>
-        <BoxScoreTable game={game} players={players} />
+      <Card style={{ marginBottom: 16, overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 13 }}>
+          <thead><tr style={{ color: C.amber, textAlign: "left" }}>{["Player", "AB", "R", "H", "RBI", "BB", "K", "AVG"].map((h) => <th key={h} style={{ padding: "4px 8px", borderBottom: `1px solid ${C.line}55` }}>{h}</th>)}</tr></thead>
+          <tbody>{rows.map(({ p, s }) => (
+            <tr key={p.id} style={{ color: C.chalk }}>
+              <td style={{ padding: "4px 8px" }}>{p.name}</td><td style={{ padding: "4px 8px" }}>{s.AB}</td><td style={{ padding: "4px 8px" }}>{s.R}</td>
+              <td style={{ padding: "4px 8px" }}>{s.H}</td><td style={{ padding: "4px 8px" }}>{s.RBI}</td><td style={{ padding: "4px 8px" }}>{s.BB}</td>
+              <td style={{ padding: "4px 8px" }}>{s.K}</td><td style={{ padding: "4px 8px" }}>{fmt3(s.AVG)}</td>
+            </tr>
+          ))}</tbody>
+        </table>
       </Card>
 
-      {game.substitutions.length > 0 && (
-        <>
-          <Eyebrow>Substitutions</Eyebrow>
-          <Card style={{ marginBottom: 16 }}>
-            {game.substitutions.map((s, i) => {
-              const inP = players.find((x) => x.id === s.inPlayerId);
-              const outP = players.find((x) => x.id === s.outPlayerId);
-              return (
-                <div key={i} style={{ fontSize: 13, color: C.chalk, fontFamily: "IBM Plex Mono, monospace" }}>
-                  {s.half === "top" ? "T" : "B"}{s.inning} — {inP ? inP.name : "?"} in for {outP ? outP.name : "?"} (slot {s.slotIndex + 1})
-                </div>
-              );
-            })}
-          </Card>
-        </>
-      )}
-
-      {(game.pitching.ourHistory.length > 0 || game.pitching.ourPitcherId || Object.keys(game.fielding).length > 0) && (
+      {(pitchers.length > 0 || Object.keys(game.fielding).length > 0) && (
         <>
           <Eyebrow>Pitching & Fielding</Eyebrow>
           <Card style={{ marginBottom: 16 }}>
-            <PitchingLineDisplay game={game} players={players} />
-            {game.pitching.theirName && (
-              <div style={{ color: C.chalkDim, fontSize: 13, fontFamily: "IBM Plex Mono, monospace", marginTop: 8 }}>
-                {game.opponent} — {game.pitching.theirName}: {game.pitching.theirBalls + game.pitching.theirStrikes} pitches, {game.pitching.theirStrikes} strikes
-                ({(game.pitching.theirBalls + game.pitching.theirStrikes) > 0 ? Math.round((game.pitching.theirStrikes / (game.pitching.theirBalls + game.pitching.theirStrikes)) * 100) : 0}%)
+            {pitchers.length > 0 && (
+              <div style={{ marginBottom: 10 }}>
+                {pitchers.map((h, i) => {
+                  const p = players.find((x) => x.id === h.playerId);
+                  return <div key={i} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>{p ? p.name : "?"} — {h.pitches} pitches</div>;
+                })}
+                {game.pitching.theirName && <div style={{ color: C.chalkDim, fontSize: 13, fontFamily: "IBM Plex Mono, monospace", marginTop: 4 }}>{game.opponent} — {game.pitching.theirName}: {game.pitching.theirCount} pitches</div>}
               </div>
             )}
             {Object.keys(game.fielding).length > 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 3, marginTop: 10 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
                 {Object.entries(game.fielding).filter(([, f]) => f.PO || f.A || f.E).map(([pid, f]) => {
                   const p = players.find((x) => x.id === pid);
                   return <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>{p ? p.name : "?"} — {f.PO} PO, {f.A} A, {f.E} E</div>;
@@ -2079,11 +1205,13 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
     loadFinalGamesForTeam(teamId).then((g) => { setGames(g); setLoading(false); });
   }, [teamId, loadFinalGamesForTeam]);
   const rosterPlayers = players.filter((p) => p.teamId === teamId);
-  const rows = rosterPlayers.map((p) => ({ p, s: aggregateSeasonStats(p.id, games) })).sort((a, b) => b.s[sortKey] - a.s[sortKey]);
+  const allPlays = games.flatMap((g) => g.plays);
+  const allScores = games.flatMap((g) => g.scores || []);
+  const rows = rosterPlayers.map((p) => ({ p, s: computeStatsFromPlays(p.id, allPlays, allScores) })).sort((a, b) => b.s[sortKey] - a.s[sortKey]);
   const sortable = ["AVG", "OBP", "SLG", "H", "R", "RBI", "HR", "BB", "K"];
 
   const fieldingTotals = {};
-  const pitchStintsByPlayer = {};
+  const pitchTotals = {};
   games.forEach((g) => {
     Object.entries(g.fielding || {}).forEach(([pid, f]) => {
       fieldingTotals[pid] = fieldingTotals[pid] || { PO: 0, A: 0, E: 0 };
@@ -2092,8 +1220,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
       fieldingTotals[pid].E += f.E || 0;
     });
     (g.pitching?.ourHistory || []).forEach((h) => {
-      pitchStintsByPlayer[h.playerId] = pitchStintsByPlayer[h.playerId] || [];
-      pitchStintsByPlayer[h.playerId].push(h);
+      pitchTotals[h.playerId] = (pitchTotals[h.playerId] || 0) + h.pitches;
     });
   });
 
@@ -2150,48 +1277,26 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
         )}
       </Card>
 
-      {(Object.keys(pitchStintsByPlayer).length > 0) && (
+      {(Object.keys(fieldingTotals).length > 0 || Object.keys(pitchTotals).length > 0) && (
         <>
-          <Eyebrow>Season Pitching</Eyebrow>
-          <Card style={{ overflowX: "auto", marginBottom: 16 }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 12.5, minWidth: 480 }}>
-              <thead>
-                <tr style={{ color: C.amber, textAlign: "left" }}>
-                  {["Player", "IP", "ER", "ERA", "Pitches", "Strike%"].map((h) => <th key={h} style={{ padding: "4px 6px", borderBottom: `1px solid ${C.line}55` }}>{h}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(pitchStintsByPlayer).map(([pid, stints]) => {
-                  const p = rosterPlayers.find((x) => x.id === pid);
-                  const line = pitchingLine(stints);
-                  return (
-                    <tr key={pid} style={{ color: C.chalk }}>
-                      <td style={{ padding: "4px 6px" }}>{p ? p.name : "?"}</td>
-                      <td style={{ padding: "4px 6px" }}>{ipDisplay(line.outs)}</td>
-                      <td style={{ padding: "4px 6px" }}>{line.er}</td>
-                      <td style={{ padding: "4px 6px" }}>{line.era.toFixed(2)}</td>
-                      <td style={{ padding: "4px 6px" }}>{line.pitches}</td>
-                      <td style={{ padding: "4px 6px" }}>{line.strikePct.toFixed(0)}%</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            <div style={{ fontSize: 11, color: C.chalkDim, marginTop: 8 }}>ERA is normalized to a {ERA_INNINGS}-inning game.</div>
-          </Card>
-        </>
-      )}
-
-      {Object.keys(fieldingTotals).length > 0 && (
-        <>
-          <Eyebrow>Season Fielding</Eyebrow>
+          <Eyebrow>Season Pitching & Fielding</Eyebrow>
           <Card style={{ overflowX: "auto" }}>
-            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-              {Object.entries(fieldingTotals).map(([pid, f]) => {
-                const p = rosterPlayers.find((x) => x.id === pid);
-                return <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>{p ? p.name : "?"} — {f.PO} PO, {f.A} A, {f.E} E</div>;
-              })}
-            </div>
+            {Object.keys(pitchTotals).length > 0 && (
+              <div style={{ marginBottom: 10 }}>
+                {Object.entries(pitchTotals).map(([pid, total]) => {
+                  const p = rosterPlayers.find((x) => x.id === pid);
+                  return <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>{p ? p.name : "?"} — {total} pitches thrown</div>;
+                })}
+              </div>
+            )}
+            {Object.keys(fieldingTotals).length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                {Object.entries(fieldingTotals).map(([pid, f]) => {
+                  const p = rosterPlayers.find((x) => x.id === pid);
+                  return <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>{p ? p.name : "?"} — {f.PO} PO, {f.A} A, {f.E} E</div>;
+                })}
+              </div>
+            )}
           </Card>
         </>
       )}
