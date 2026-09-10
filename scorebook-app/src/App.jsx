@@ -311,9 +311,6 @@ function GameField({ runners, hasBatter, pitchTrigger, flight }) {
       <polygon points="150,300 255,205 150,100 45,205" fill={C.dirt} opacity="0.92" />
       {/* infield grass */}
       <polygon points="150,280 225,205 150,130 75,205" fill={C.greenLight} />
-      {/* foul lines */}
-      <line x1={FIELD_HOME[0]} y1={FIELD_HOME[1]} x2={228} y2={58} stroke={C.chalk} strokeWidth="2" opacity="0.8" />
-      <line x1={FIELD_HOME[0]} y1={FIELD_HOME[1]} x2={72} y2={58} stroke={C.chalk} strokeWidth="2" opacity="0.8" />
       {/* mound */}
       <circle cx={FIELD_MOUND[0]} cy={FIELD_MOUND[1]} r={15} fill={C.dirt} stroke={C.dirtLight} strokeWidth="1" />
       <rect x={FIELD_MOUND[0] - 6} y={FIELD_MOUND[1] - 2} width={12} height={4} fill={C.chalk} />
