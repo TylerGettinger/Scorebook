@@ -205,6 +205,22 @@ function RecordBadge({ record, size = 12 }) {
 }
 const ipDisplay = (outs) => `${Math.floor(outs / 3)}.${outs % 3}`;
 
+// ISO date strings ("YYYY-MM-DD") sort correctly as plain strings, so no Date
+// parsing is needed to filter games by range.
+function presetDateRange(days) {
+  const end = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - days);
+  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+}
+function buildStatBlurb(player, s, rangeLabel, teamName) {
+  const parts = [`${s.H}-for-${s.AB} (${fmt3(s.AVG)})`, `${s.R} R`, `${s.RBI} RBI`];
+  if (s.HR > 0) parts.push(`${s.HR} HR`);
+  if (s.BB > 0) parts.push(`${s.BB} BB`);
+  const hashtag = (teamName || "Softball").replace(/[^a-zA-Z0-9]/g, "");
+  return `${player.name}'s ${rangeLabel}: ${parts.join(", ")} ⚾ #${hashtag}`;
+}
+
 // Resizes an uploaded image down to a small square-ish logo and returns a
 // data URL, so team logos stay lightweight enough to store directly on the row.
 function resizeImageFile(file, maxDim = 200) {
@@ -2070,18 +2086,29 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
   const [games, setGames] = useState([]);
   const [sortKey, setSortKey] = useState("AVG");
   const [loading, setLoading] = useState(false);
+  const [rangeMode, setRangeMode] = useState("season"); // 'season' | 'week' | 'month' | 'custom'
+  const [customStart, setCustomStart] = useState(presetDateRange(7).start);
+  const [customEnd, setCustomEnd] = useState(presetDateRange(0).end);
+  const [spotlightId, setSpotlightId] = useState("");
+  const [blurb, setBlurb] = useState("");
+
   useEffect(() => {
     if (!teamId) return;
     setLoading(true);
     loadFinalGamesForTeam(teamId).then((g) => { setGames(g); setLoading(false); });
   }, [teamId, loadFinalGamesForTeam]);
+
+  const range = rangeMode === "week" ? presetDateRange(7) : rangeMode === "month" ? presetDateRange(30) : rangeMode === "custom" ? { start: customStart, end: customEnd } : null;
+  const filteredGames = range ? games.filter((g) => g.date >= range.start && g.date <= range.end) : games;
+
   const rosterPlayers = players.filter((p) => p.teamId === teamId);
-  const rows = rosterPlayers.map((p) => ({ p, s: aggregateSeasonStats(p.id, games) })).sort((a, b) => b.s[sortKey] - a.s[sortKey]);
+  const rows = rosterPlayers.map((p) => ({ p, s: aggregateSeasonStats(p.id, filteredGames) })).sort((a, b) => b.s[sortKey] - a.s[sortKey]);
   const sortable = ["AVG", "OBP", "SLG", "H", "R", "RBI", "HR", "BB", "K"];
+  const rangeLabel = rangeMode === "week" ? "past week" : rangeMode === "month" ? "past month" : rangeMode === "custom" ? `${customStart} to ${customEnd}` : "season";
 
   const fieldingTotals = {};
   const pitchStintsByPlayer = {};
-  games.forEach((g) => {
+  filteredGames.forEach((g) => {
     Object.entries(g.fielding || {}).forEach(([pid, f]) => {
       fieldingTotals[pid] = fieldingTotals[pid] || { PO: 0, A: 0, E: 0 };
       fieldingTotals[pid].PO += f.PO || 0;
@@ -2094,6 +2121,16 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
     });
   });
 
+  useEffect(() => {
+    if (!spotlightId) { setBlurb(""); return; }
+    const p = rosterPlayers.find((x) => x.id === spotlightId);
+    if (!p) return;
+    const s = aggregateSeasonStats(spotlightId, filteredGames);
+    const team = teams.find((t) => t.id === teamId);
+    setBlurb(buildStatBlurb(p, s, rangeLabel, team ? team.name : ""));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spotlightId, teamId, rangeMode, customStart, customEnd, games.length]);
+
   return (
     <div>
       <BackLink onClick={goHome}>Home</BackLink>
@@ -2105,6 +2142,30 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
         </select>
       </Field>
 
+      <Eyebrow>Time range</Eyebrow>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+        {[["season", "Full Season"], ["week", "Past Week"], ["month", "Past Month"], ["custom", "Custom"]].map(([mode, label]) => (
+          <button
+            key={mode}
+            onClick={() => setRangeMode(mode)}
+            style={{ padding: "5px 12px", borderRadius: 14, fontSize: 12, fontFamily: "IBM Plex Mono, monospace", border: `1px solid ${rangeMode === mode ? C.amber : C.line}`, background: rangeMode === mode ? C.amber : "transparent", color: rangeMode === mode ? C.ink : C.chalkDim, cursor: "pointer", fontWeight: 600 }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {rangeMode === "custom" && (
+        <div style={{ display: "flex", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+          <Field label="Start date"><input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} style={selStyle} /></Field>
+          <Field label="End date"><input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} style={selStyle} /></Field>
+        </div>
+      )}
+      {rangeMode !== "season" && (
+        <p style={{ color: C.chalkDim, fontSize: 12, marginTop: -4, marginBottom: 14 }}>
+          Showing {filteredGames.length} game{filteredGames.length !== 1 ? "s" : ""} from {range.start} to {range.end}.
+        </p>
+      )}
+
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
         {sortable.map((k) => (
           <button key={k} onClick={() => setSortKey(k)} style={{ padding: "4px 10px", borderRadius: 14, fontSize: 12, fontFamily: "IBM Plex Mono, monospace", border: `1px solid ${sortKey === k ? C.amber : C.line}`, background: sortKey === k ? C.amber : "transparent", color: sortKey === k ? C.ink : C.chalkDim, cursor: "pointer" }}>{k}</button>
@@ -2113,7 +2174,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
 
       <Card style={{ overflowX: "auto", marginBottom: 16 }}>
         {loading && <p style={{ color: C.chalkDim }}>Loading games…</p>}
-        {!loading && rows.length === 0 && <p style={{ color: C.chalkDim, margin: 0 }}>No finished games yet for this team.</p>}
+        {!loading && rows.length === 0 && <p style={{ color: C.chalkDim, margin: 0 }}>No finished games in this range.</p>}
         {!loading && rows.length > 0 && (
           <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 12.5, minWidth: 560 }}>
             <thead>
@@ -2182,7 +2243,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
       {Object.keys(fieldingTotals).length > 0 && (
         <>
           <Eyebrow>Season Fielding</Eyebrow>
-          <Card style={{ overflowX: "auto" }}>
+          <Card style={{ overflowX: "auto", marginBottom: 16 }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
               {Object.entries(fieldingTotals).map(([pid, f]) => {
                 const p = rosterPlayers.find((x) => x.id === pid);
@@ -2192,6 +2253,32 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
           </Card>
         </>
       )}
+
+      <Eyebrow>Player spotlight — for a quick post</Eyebrow>
+      <Card>
+        <Field label="Player">
+          <select value={spotlightId} onChange={(e) => setSpotlightId(e.target.value)} style={selStyle}>
+            <option value="">Choose a player…</option>
+            {rosterPlayers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+        {spotlightId && (
+          <>
+            <textarea
+              value={blurb}
+              onChange={(e) => setBlurb(e.target.value)}
+              rows={3}
+              style={{ width: "100%", padding: 10, borderRadius: 8, border: `1px solid ${C.line}`, background: C.chalk, color: C.ink, fontSize: 14, lineHeight: 1.5, resize: "vertical", marginTop: 8 }}
+            />
+            <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+              <Btn size="sm" tone="ghost" onClick={() => navigator.clipboard && navigator.clipboard.writeText(blurb)}>Copy Text</Btn>
+              <a href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(blurb)}`} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}>
+                <Btn size="sm" tone="amber">Open in X</Btn>
+              </a>
+            </div>
+          </>
+        )}
+      </Card>
     </div>
   );
 }
