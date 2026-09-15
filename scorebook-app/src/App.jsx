@@ -203,6 +203,25 @@ function RecordBadge({ record, size = 12 }) {
     </span>
   );
 }
+
+// entries: [{ id, name, value }]. Ranks descending by default (ascending=true for things like ERA where lower is better).
+function Leaderboard({ title, entries, ascending, format }) {
+  if (!entries || entries.length === 0) return null;
+  const sorted = [...entries].sort((a, b) => (ascending ? a.value - b.value : b.value - a.value)).slice(0, 3);
+  const fmt = format || ((v) => v);
+  const medals = ["🥇", "🥈", "🥉"];
+  return (
+    <Card>
+      <Eyebrow>{title}</Eyebrow>
+      {sorted.map((e, i) => (
+        <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 0", borderBottom: i < sorted.length - 1 ? `1px solid ${C.line}22` : "none" }}>
+          <span style={{ color: C.chalk, fontSize: 14 }}>{medals[i]} {e.name}</span>
+          <span style={{ color: C.amber, fontFamily: "IBM Plex Mono, monospace", fontWeight: 700, fontSize: 14 }}>{fmt(e.value)}</span>
+        </div>
+      ))}
+    </Card>
+  );
+}
 const ipDisplay = (outs) => `${Math.floor(outs / 3)}.${outs % 3}`;
 
 // ISO date strings ("YYYY-MM-DD") sort correctly as plain strings, so no Date
@@ -2121,6 +2140,8 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
     });
   });
 
+  const [viewMode, setViewMode] = useState("table"); // 'table' | 'hot'
+
   useEffect(() => {
     if (!spotlightId) { setBlurb(""); return; }
     const p = rosterPlayers.find((x) => x.id === spotlightId);
@@ -2130,6 +2151,15 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
     setBlurb(buildStatBlurb(p, s, rangeLabel, team ? team.name : ""));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spotlightId, teamId, rangeMode, customStart, customEnd, games.length]);
+
+  const MIN_AB = 3;
+  const entriesFor = (statKey, minAB) => rows
+    .filter(({ s }) => (minAB ? s.AB >= minAB : true) && s[statKey] > 0)
+    .map(({ p, s }) => ({ id: p.id, name: p.name, value: s[statKey] }));
+  const pitchingRows = Object.entries(pitchStintsByPlayer).map(([pid, stints]) => ({ p: rosterPlayers.find((x) => x.id === pid), line: pitchingLine(stints) })).filter((x) => x.p);
+  const eraEntries = pitchingRows.filter((x) => x.line.ip >= 1).map((x) => ({ id: x.p.id, name: x.p.name, value: x.line.era }));
+  const strikePctEntries = pitchingRows.filter((x) => x.line.pitches >= 10).map((x) => ({ id: x.p.id, name: x.p.name, value: x.line.strikePct }));
+  const hasAnyHotData = [entriesFor("AVG", MIN_AB), entriesFor("H"), entriesFor("RBI"), entriesFor("HR"), entriesFor("R"), eraEntries, strikePctEntries].some((e) => e.length > 0);
 
   return (
     <div>
@@ -2141,6 +2171,11 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
           {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
         </select>
       </Field>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <Btn tone={viewMode === "table" ? "amber" : "ghost"} size="sm" onClick={() => setViewMode("table")}>Stats Table</Btn>
+        <Btn tone={viewMode === "hot" ? "amber" : "ghost"} size="sm" onClick={() => setViewMode("hot")}>🔥 Who's Hot</Btn>
+      </div>
 
       <Eyebrow>Time range</Eyebrow>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
@@ -2166,6 +2201,37 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
         </p>
       )}
 
+      {viewMode === "hot" && (
+        <>
+          {!hasAnyHotData && (
+            <Card style={{ marginBottom: 16 }}>
+              <p style={{ color: C.chalkDim, margin: 0 }}>Not enough games in this range yet to spot trends — try Full Season, or check back after a few more games.</p>
+            </Card>
+          )}
+          {hasAnyHotData && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12, marginBottom: 12 }}>
+                <Leaderboard title="Batting Average" entries={entriesFor("AVG", MIN_AB)} format={fmt3} />
+                <Leaderboard title="On-Base %" entries={entriesFor("OBP", MIN_AB)} format={fmt3} />
+                <Leaderboard title="Hits" entries={entriesFor("H")} />
+                <Leaderboard title="RBI" entries={entriesFor("RBI")} />
+                <Leaderboard title="Home Runs" entries={entriesFor("HR")} />
+                <Leaderboard title="Runs" entries={entriesFor("R")} />
+              </div>
+              {(eraEntries.length > 0 || strikePctEntries.length > 0) && (
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12, marginBottom: 12 }}>
+                  <Leaderboard title="ERA" entries={eraEntries} ascending format={(v) => v.toFixed(2)} />
+                  <Leaderboard title="Strike %" entries={strikePctEntries} format={(v) => `${Math.round(v)}%`} />
+                </div>
+              )}
+              <p style={{ color: C.chalkDim, fontSize: 11 }}>Rate stats (AVG, OBP, ERA, Strike %) require a minimum of {MIN_AB} AB (or 1 IP / 10 pitches for pitching) to qualify, so one big at-bat doesn't skew the list.</p>
+            </>
+          )}
+        </>
+      )}
+
+      {viewMode === "table" && (
+        <>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
         {sortable.map((k) => (
           <button key={k} onClick={() => setSortKey(k)} style={{ padding: "4px 10px", borderRadius: 14, fontSize: 12, fontFamily: "IBM Plex Mono, monospace", border: `1px solid ${sortKey === k ? C.amber : C.line}`, background: sortKey === k ? C.amber : "transparent", color: sortKey === k ? C.ink : C.chalkDim, cursor: "pointer" }}>{k}</button>
@@ -2251,6 +2317,8 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
               })}
             </div>
           </Card>
+        </>
+      )}
         </>
       )}
 
