@@ -158,11 +158,18 @@ function computeStatsFromPlays(playerId, plays, scores) {
 }
 function withRates(s) {
   const totalBases = s.H - s["2B"] - s["3B"] - s.HR + s["2B"] * 2 + s["3B"] * 3 + s.HR * 4;
+  const AVG = s.AB > 0 ? s.H / s.AB : 0;
+  const OBP = s.AB + s.BB + s.HBP + s.SF > 0 ? (s.H + s.BB + s.HBP) / (s.AB + s.BB + s.HBP + s.SF) : 0;
+  const SLG = s.AB > 0 ? totalBases / s.AB : 0;
   return {
     ...s,
-    AVG: s.AB > 0 ? s.H / s.AB : 0,
-    OBP: s.AB + s.BB + s.HBP + s.SF > 0 ? (s.H + s.BB + s.HBP) / (s.AB + s.BB + s.HBP + s.SF) : 0,
-    SLG: s.AB > 0 ? totalBases / s.AB : 0,
+    AVG,
+    OBP,
+    SLG,
+    OPS: OBP + SLG,
+    ISO: SLG - AVG,
+    BBPct: s.PA > 0 ? (s.BB / s.PA) * 100 : 0,
+    KPct: s.PA > 0 ? (s.K / s.PA) * 100 : 0,
   };
 }
 // Works for both a live-tracked game (computed from individual plays) and a
@@ -2122,7 +2129,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
 
   const rosterPlayers = players.filter((p) => p.teamId === teamId);
   const rows = rosterPlayers.map((p) => ({ p, s: aggregateSeasonStats(p.id, filteredGames) })).sort((a, b) => b.s[sortKey] - a.s[sortKey]);
-  const sortable = ["AVG", "OBP", "SLG", "H", "R", "RBI", "HR", "BB", "K"];
+  const sortable = [["AVG", "AVG"], ["OBP", "OBP"], ["SLG", "SLG"], ["OPS", "OPS"], ["H", "H"], ["R", "R"], ["RBI", "RBI"], ["HR", "HR"], ["BB", "BB"], ["K", "K"], ["BB%", "BBPct"], ["K%", "KPct"]];
   const rangeLabel = rangeMode === "week" ? "past week" : rangeMode === "month" ? "past month" : rangeMode === "custom" ? `${customStart} to ${customEnd}` : "season";
 
   const fieldingTotals = {};
@@ -2153,8 +2160,8 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
   }, [spotlightId, teamId, rangeMode, customStart, customEnd, games.length]);
 
   const MIN_AB = 3;
-  const entriesFor = (statKey, minAB) => rows
-    .filter(({ s }) => (minAB ? s.AB >= minAB : true) && s[statKey] > 0)
+  const entriesFor = (statKey, minAB, allowZero) => rows
+    .filter(({ s }) => (minAB ? s.AB >= minAB : true) && (allowZero || s[statKey] > 0))
     .map(({ p, s }) => ({ id: p.id, name: p.name, value: s[statKey] }));
   const pitchingRows = Object.entries(pitchStintsByPlayer).map(([pid, stints]) => ({ p: rosterPlayers.find((x) => x.id === pid), line: pitchingLine(stints) })).filter((x) => x.p);
   const eraEntries = pitchingRows.filter((x) => x.line.ip >= 1).map((x) => ({ id: x.p.id, name: x.p.name, value: x.line.era }));
@@ -2211,12 +2218,15 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
           {hasAnyHotData && (
             <>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12, marginBottom: 12 }}>
+                <Leaderboard title="OPS" entries={entriesFor("OPS", MIN_AB)} format={fmt3} />
                 <Leaderboard title="Batting Average" entries={entriesFor("AVG", MIN_AB)} format={fmt3} />
                 <Leaderboard title="On-Base %" entries={entriesFor("OBP", MIN_AB)} format={fmt3} />
                 <Leaderboard title="Hits" entries={entriesFor("H")} />
                 <Leaderboard title="RBI" entries={entriesFor("RBI")} />
                 <Leaderboard title="Home Runs" entries={entriesFor("HR")} />
                 <Leaderboard title="Runs" entries={entriesFor("R")} />
+                <Leaderboard title="Most Patient (BB%)" entries={entriesFor("BBPct", MIN_AB)} format={(v) => `${v.toFixed(1)}%`} />
+                <Leaderboard title="Best Contact (K%)" entries={entriesFor("KPct", MIN_AB, true)} ascending format={(v) => `${v.toFixed(1)}%`} />
               </div>
               {(eraEntries.length > 0 || strikePctEntries.length > 0) && (
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12, marginBottom: 12 }}>
@@ -2224,7 +2234,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
                   <Leaderboard title="Strike %" entries={strikePctEntries} format={(v) => `${Math.round(v)}%`} />
                 </div>
               )}
-              <p style={{ color: C.chalkDim, fontSize: 11 }}>Rate stats (AVG, OBP, ERA, Strike %) require a minimum of {MIN_AB} AB (or 1 IP / 10 pitches for pitching) to qualify, so one big at-bat doesn't skew the list.</p>
+              <p style={{ color: C.chalkDim, fontSize: 11 }}>Rate stats (AVG, OBP, OPS, BB%, K%, ERA, Strike %) require a minimum of {MIN_AB} AB (or 1 IP / 10 pitches for pitching) to qualify, so one big at-bat doesn't skew the list.</p>
             </>
           )}
         </>
@@ -2233,8 +2243,8 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
       {viewMode === "table" && (
         <>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
-        {sortable.map((k) => (
-          <button key={k} onClick={() => setSortKey(k)} style={{ padding: "4px 10px", borderRadius: 14, fontSize: 12, fontFamily: "IBM Plex Mono, monospace", border: `1px solid ${sortKey === k ? C.amber : C.line}`, background: sortKey === k ? C.amber : "transparent", color: sortKey === k ? C.ink : C.chalkDim, cursor: "pointer" }}>{k}</button>
+        {sortable.map(([label, key]) => (
+          <button key={key} onClick={() => setSortKey(key)} style={{ padding: "4px 10px", borderRadius: 14, fontSize: 12, fontFamily: "IBM Plex Mono, monospace", border: `1px solid ${sortKey === key ? C.amber : C.line}`, background: sortKey === key ? C.amber : "transparent", color: sortKey === key ? C.ink : C.chalkDim, cursor: "pointer" }}>{label}</button>
         ))}
       </div>
 
@@ -2245,7 +2255,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
           <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 12.5, minWidth: 560 }}>
             <thead>
               <tr style={{ color: C.amber, textAlign: "left" }}>
-                {["Player", "PA", "AB", "R", "H", "2B", "3B", "HR", "RBI", "BB", "K", "AVG", "OBP", "SLG"].map((h) => (
+                {["Player", "PA", "AB", "R", "H", "2B", "3B", "HR", "RBI", "BB", "K", "AVG", "OBP", "SLG", "OPS", "BB%", "K%"].map((h) => (
                   <th key={h} style={{ padding: "4px 6px", borderBottom: `1px solid ${C.line}55` }}>{h}</th>
                 ))}
               </tr>
@@ -2267,6 +2277,9 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
                   <td style={{ padding: "4px 6px" }}>{fmt3(s.AVG)}</td>
                   <td style={{ padding: "4px 6px" }}>{fmt3(s.OBP)}</td>
                   <td style={{ padding: "4px 6px" }}>{fmt3(s.SLG)}</td>
+                  <td style={{ padding: "4px 6px" }}>{fmt3(s.OPS)}</td>
+                  <td style={{ padding: "4px 6px" }}>{s.PA > 0 ? s.BBPct.toFixed(1) : "0.0"}%</td>
+                  <td style={{ padding: "4px 6px" }}>{s.PA > 0 ? s.KPct.toFixed(1) : "0.0"}%</td>
                 </tr>
               ))}
             </tbody>
