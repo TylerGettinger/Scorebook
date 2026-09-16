@@ -168,6 +168,7 @@ function withRates(s) {
     SLG,
     OPS: OBP + SLG,
     ISO: SLG - AVG,
+    XBH: (s["2B"] || 0) + (s["3B"] || 0) + (s.HR || 0),
     BBPct: s.PA > 0 ? (s.BB / s.PA) * 100 : 0,
     KPct: s.PA > 0 ? (s.K / s.PA) * 100 : 0,
   };
@@ -191,6 +192,22 @@ function aggregateSeasonStats(playerId, games) {
     Object.keys(totals).forEach((k) => { totals[k] += s[k] || 0; });
   });
   return withRates(totals);
+}
+// Best single-game performances (season highs) rather than season totals —
+// one entry per player per game where statKey > 0, so a leaderboard can show
+// "4 H vs Fireballs on 4/12" instead of a career sum.
+function gameHighEntries(games, players, statKey) {
+  const entries = [];
+  games.forEach((g) => {
+    const ids = new Set([...(g.lineup || []), ...(g.plays || []).map((p) => p.playerId), ...Object.keys(g.manualStats || {})]);
+    ids.forEach((pid) => {
+      const p = players.find((x) => x.id === pid);
+      if (!p) return;
+      const s = statsForPlayerInGame(g, pid);
+      if (s[statKey] > 0) entries.push({ id: `${g.id}-${pid}`, name: p.name, value: s[statKey], opponent: g.opponent, date: g.date });
+    });
+  });
+  return entries;
 }
 
 const fmt3 = (n) => (n === 0 ? ".000" : n.toFixed(3).replace(/^0/, ""));
@@ -224,6 +241,28 @@ function Leaderboard({ title, entries, ascending, format }) {
         <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 0", borderBottom: i < sorted.length - 1 ? `1px solid ${C.line}22` : "none" }}>
           <span style={{ color: C.chalk, fontSize: 14 }}>{medals[i]} {e.name}</span>
           <span style={{ color: C.amber, fontFamily: "IBM Plex Mono, monospace", fontWeight: 700, fontSize: 14 }}>{fmt(e.value)}</span>
+        </div>
+      ))}
+    </Card>
+  );
+}
+// Best single-game performances (not season totals) — entries carry an
+// opponent/date so each result reads like "4 H vs Fireballs on 4/12".
+function GameHighBoard({ title, entries, format }) {
+  if (!entries || entries.length === 0) return null;
+  const sorted = [...entries].sort((a, b) => b.value - a.value).slice(0, 3);
+  const fmt = format || ((v) => v);
+  const medals = ["🥇", "🥈", "🥉"];
+  return (
+    <Card>
+      <Eyebrow>{title}</Eyebrow>
+      {sorted.map((e, i) => (
+        <div key={e.id} style={{ padding: "6px 0", borderBottom: i < sorted.length - 1 ? `1px solid ${C.line}22` : "none" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ color: C.chalk, fontSize: 14 }}>{medals[i]} {e.name}</span>
+            <span style={{ color: C.amber, fontFamily: "IBM Plex Mono, monospace", fontWeight: 700, fontSize: 14 }}>{fmt(e.value)}</span>
+          </div>
+          <div style={{ fontSize: 11, color: C.chalkDim, fontFamily: "IBM Plex Mono, monospace" }}>vs {e.opponent} · {e.date}</div>
         </div>
       ))}
     </Card>
@@ -2129,7 +2168,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
 
   const rosterPlayers = players.filter((p) => p.teamId === teamId);
   const rows = rosterPlayers.map((p) => ({ p, s: aggregateSeasonStats(p.id, filteredGames) })).sort((a, b) => b.s[sortKey] - a.s[sortKey]);
-  const sortable = [["AVG", "AVG"], ["OBP", "OBP"], ["SLG", "SLG"], ["OPS", "OPS"], ["H", "H"], ["R", "R"], ["RBI", "RBI"], ["HR", "HR"], ["BB", "BB"], ["K", "K"], ["BB%", "BBPct"], ["K%", "KPct"]];
+  const sortable = [["AVG", "AVG"], ["OBP", "OBP"], ["SLG", "SLG"], ["OPS", "OPS"], ["ISO", "ISO"], ["XBH", "XBH"], ["H", "H"], ["R", "R"], ["RBI", "RBI"], ["HR", "HR"], ["BB", "BB"], ["K", "K"], ["BB%", "BBPct"], ["K%", "KPct"]];
   const rangeLabel = rangeMode === "week" ? "past week" : rangeMode === "month" ? "past month" : rangeMode === "custom" ? `${customStart} to ${customEnd}` : "season";
 
   const fieldingTotals = {};
@@ -2147,7 +2186,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
     });
   });
 
-  const [viewMode, setViewMode] = useState("table"); // 'table' | 'hot'
+  const [viewMode, setViewMode] = useState("table"); // 'table' | 'hot' | 'highs'
 
   useEffect(() => {
     if (!spotlightId) { setBlurb(""); return; }
@@ -2182,6 +2221,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
         <Btn tone={viewMode === "table" ? "amber" : "ghost"} size="sm" onClick={() => setViewMode("table")}>Stats Table</Btn>
         <Btn tone={viewMode === "hot" ? "amber" : "ghost"} size="sm" onClick={() => setViewMode("hot")}>🔥 Who's Hot</Btn>
+        <Btn tone={viewMode === "highs" ? "amber" : "ghost"} size="sm" onClick={() => setViewMode("highs")}>🏆 Season Highs</Btn>
       </div>
 
       <Eyebrow>Time range</Eyebrow>
@@ -2221,6 +2261,8 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
                 <Leaderboard title="OPS" entries={entriesFor("OPS", MIN_AB)} format={fmt3} />
                 <Leaderboard title="Batting Average" entries={entriesFor("AVG", MIN_AB)} format={fmt3} />
                 <Leaderboard title="On-Base %" entries={entriesFor("OBP", MIN_AB)} format={fmt3} />
+                <Leaderboard title="Power (ISO)" entries={entriesFor("ISO", MIN_AB)} format={fmt3} />
+                <Leaderboard title="Extra-Base Hits" entries={entriesFor("XBH")} />
                 <Leaderboard title="Hits" entries={entriesFor("H")} />
                 <Leaderboard title="RBI" entries={entriesFor("RBI")} />
                 <Leaderboard title="Home Runs" entries={entriesFor("HR")} />
@@ -2235,6 +2277,29 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
                 </div>
               )}
               <p style={{ color: C.chalkDim, fontSize: 11 }}>Rate stats (AVG, OBP, OPS, BB%, K%, ERA, Strike %) require a minimum of {MIN_AB} AB (or 1 IP / 10 pitches for pitching) to qualify, so one big at-bat doesn't skew the list.</p>
+            </>
+          )}
+        </>
+      )}
+
+      {viewMode === "highs" && (
+        <>
+          {filteredGames.length === 0 && (
+            <Card style={{ marginBottom: 16 }}>
+              <p style={{ color: C.chalkDim, margin: 0 }}>No finished games in this range yet.</p>
+            </Card>
+          )}
+          {filteredGames.length > 0 && (
+            <>
+              <p style={{ color: C.chalkDim, fontSize: 12, marginTop: -4, marginBottom: 12 }}>Best single-game performances in this range — not season totals.</p>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
+                <GameHighBoard title="Most Hits" entries={gameHighEntries(filteredGames, rosterPlayers, "H")} />
+                <GameHighBoard title="Most RBI" entries={gameHighEntries(filteredGames, rosterPlayers, "RBI")} />
+                <GameHighBoard title="Most Home Runs" entries={gameHighEntries(filteredGames, rosterPlayers, "HR")} />
+                <GameHighBoard title="Most Extra-Base Hits" entries={gameHighEntries(filteredGames, rosterPlayers, "XBH")} />
+                <GameHighBoard title="Most Runs Scored" entries={gameHighEntries(filteredGames, rosterPlayers, "R")} />
+                <GameHighBoard title="Most Walks" entries={gameHighEntries(filteredGames, rosterPlayers, "BB")} />
+              </div>
             </>
           )}
         </>
@@ -2255,7 +2320,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
           <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 12.5, minWidth: 560 }}>
             <thead>
               <tr style={{ color: C.amber, textAlign: "left" }}>
-                {["Player", "PA", "AB", "R", "H", "2B", "3B", "HR", "RBI", "BB", "K", "AVG", "OBP", "SLG", "OPS", "BB%", "K%"].map((h) => (
+                {["Player", "PA", "AB", "R", "H", "2B", "3B", "HR", "XBH", "RBI", "BB", "K", "AVG", "OBP", "SLG", "OPS", "ISO", "BB%", "K%"].map((h) => (
                   <th key={h} style={{ padding: "4px 6px", borderBottom: `1px solid ${C.line}55` }}>{h}</th>
                 ))}
               </tr>
@@ -2271,6 +2336,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
                   <td style={{ padding: "4px 6px" }}>{s["2B"]}</td>
                   <td style={{ padding: "4px 6px" }}>{s["3B"]}</td>
                   <td style={{ padding: "4px 6px" }}>{s.HR}</td>
+                  <td style={{ padding: "4px 6px" }}>{s.XBH}</td>
                   <td style={{ padding: "4px 6px" }}>{s.RBI}</td>
                   <td style={{ padding: "4px 6px" }}>{s.BB}</td>
                   <td style={{ padding: "4px 6px" }}>{s.K}</td>
@@ -2278,6 +2344,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
                   <td style={{ padding: "4px 6px" }}>{fmt3(s.OBP)}</td>
                   <td style={{ padding: "4px 6px" }}>{fmt3(s.SLG)}</td>
                   <td style={{ padding: "4px 6px" }}>{fmt3(s.OPS)}</td>
+                  <td style={{ padding: "4px 6px" }}>{fmt3(s.ISO)}</td>
                   <td style={{ padding: "4px 6px" }}>{s.PA > 0 ? s.BBPct.toFixed(1) : "0.0"}%</td>
                   <td style={{ padding: "4px 6px" }}>{s.PA > 0 ? s.KPct.toFixed(1) : "0.0"}%</td>
                 </tr>
