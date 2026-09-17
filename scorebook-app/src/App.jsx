@@ -268,6 +268,40 @@ function GameHighBoard({ title, entries, format }) {
     </Card>
   );
 }
+
+// Minimal SVG line chart — no charting library needed. points: [{ label, value }]
+// in chronological order. Renders a smooth-ish polyline with a value axis label
+// at the top and the first/last x-axis labels at the bottom.
+function TrendChart({ points, format }) {
+  const fmt = format || ((v) => v);
+  if (!points || points.length === 0) {
+    return <p style={{ color: C.chalkDim, fontSize: 13, margin: 0 }}>Not enough games yet to chart a trend.</p>;
+  }
+  const W = 600, H = 200, PAD = 32;
+  const values = points.map((p) => p.value);
+  const maxV = Math.max(...values, 0.0001);
+  const minV = Math.min(...values, 0);
+  const range = maxV - minV || 1;
+  const stepX = points.length > 1 ? (W - PAD * 2) / (points.length - 1) : 0;
+  const coords = points.map((p, i) => ({
+    x: PAD + i * stepX,
+    y: H - PAD - ((p.value - minV) / range) * (H - PAD * 2),
+    ...p,
+  }));
+  const pathD = coords.map((c, i) => `${i === 0 ? "M" : "L"} ${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: 180 }} preserveAspectRatio="none">
+      <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} stroke={C.line} strokeWidth="1" opacity="0.4" />
+      {coords.length > 1 && <path d={pathD} fill="none" stroke={C.amber} strokeWidth="2.5" />}
+      {coords.map((c, i) => <circle key={i} cx={c.x} cy={c.y} r="3.5" fill={C.amber} stroke={C.ink} strokeWidth="1" />)}
+      <text x={PAD} y={16} fontSize="11" fill={C.chalk} fontFamily="IBM Plex Mono, monospace">{fmt(maxV)}</text>
+      {minV !== maxV && <text x={PAD} y={H - PAD - 4} fontSize="11" fill={C.chalkDim} fontFamily="IBM Plex Mono, monospace">{fmt(minV)}</text>}
+      <text x={PAD} y={H - 6} fontSize="10" fill={C.chalkDim} fontFamily="IBM Plex Mono, monospace">{points[0].label}</text>
+      <text x={W - PAD} y={H - 6} fontSize="10" fill={C.chalkDim} fontFamily="IBM Plex Mono, monospace" textAnchor="end">{points[points.length - 1].label}</text>
+    </svg>
+  );
+}
+
 const ipDisplay = (outs) => `${Math.floor(outs / 3)}.${outs % 3}`;
 
 // ISO date strings ("YYYY-MM-DD") sort correctly as plain strings, so no Date
@@ -507,6 +541,7 @@ function Scorebook() {
   const [gameIndex, setGameIndex] = useState([]);
   const [view, setView] = useState("home");
   const [activeTeamId, setActiveTeamId] = useState(null);
+  const [activePlayerId, setActivePlayerId] = useState(null);
   const [activeGame, setActiveGame] = useState(null);
   const [scorekeeper, setScorekeeper] = useState(false);
   const [selectedBase, setSelectedBase] = useState(null);
@@ -1013,7 +1048,17 @@ function Scorebook() {
             goNewGame={() => setView("newgame")}
             goAddOldGame={goAddOldGame}
             goSeason={() => setView("season")}
+            goPlayer={(id) => { setActivePlayerId(id); setView("player"); }}
             goHome={() => setView("home")}
+          />
+        )}
+        {view === "player" && (
+          <PlayerProfileView
+            player={players.find((p) => p.id === activePlayerId)}
+            team={teams.find((t) => t.id === (players.find((p) => p.id === activePlayerId) || {}).teamId)}
+            loadFinalGamesForTeam={loadFinalGamesForTeam}
+            goHome={() => setView("home")}
+            goTeam={() => setView("team")}
           />
         )}
         {view === "newgame" && (
@@ -1077,7 +1122,7 @@ function Scorebook() {
           />
         )}
         {view === "season" && (
-          <SeasonView teams={teams} players={players} loadFinalGamesForTeam={loadFinalGamesForTeam} goHome={() => setView("home")} />
+          <SeasonView teams={teams} players={players} loadFinalGamesForTeam={loadFinalGamesForTeam} goHome={() => setView("home")} goPlayer={(id) => { setActivePlayerId(id); setView("player"); }} />
         )}
       </div>
     </Wrap>
@@ -1218,7 +1263,7 @@ function HomeView({ teams, gameIndex, scorekeeper, addTeam, openTeam, openGame }
 }
 
 /* ---------------- TEAM ---------------- */
-function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, updateTeamColor, updateTeamLogo, openGame, deleteGame, goNewGame, goAddOldGame, goSeason, goHome }) {
+function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, updateTeamColor, updateTeamLogo, openGame, deleteGame, goNewGame, goAddOldGame, goSeason, goPlayer, goHome }) {
   const [name, setName] = useState("");
   const [num, setNum] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -1303,7 +1348,7 @@ function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, 
         {players.length === 0 && <p style={{ color: C.chalkDim, margin: 0 }}>No players yet.</p>}
         {players.map((p) => (
           <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: `1px solid ${C.line}22` }}>
-            <span style={{ color: C.chalk }}><span style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, marginRight: 8 }}>#{p.number || "—"}</span>{p.name}</span>
+            <span onClick={() => goPlayer(p.id)} style={{ color: C.chalk, cursor: "pointer" }}><span style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, marginRight: 8 }}>#{p.number || "—"}</span>{p.name}</span>
             {scorekeeper && <button onClick={() => removePlayer(p.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 13 }}>Remove</button>}
           </div>
         ))}
@@ -2146,7 +2191,7 @@ function SummaryView({ game, team, players, scorekeeper, generating, generateRec
 }
 
 /* ---------------- SEASON STATS ---------------- */
-function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
+function SeasonView({ teams, players, loadFinalGamesForTeam, goHome, goPlayer }) {
   const [teamId, setTeamId] = useState(teams[0] && teams[0].id);
   const [games, setGames] = useState([]);
   const [sortKey, setSortKey] = useState("AVG");
@@ -2328,7 +2373,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
             <tbody>
               {rows.map(({ p, s }) => (
                 <tr key={p.id} style={{ color: C.chalk }}>
-                  <td style={{ padding: "4px 6px" }}>{p.name}</td>
+                  <td style={{ padding: "4px 6px", cursor: "pointer", textDecoration: "underline", textDecorationColor: `${C.amber}55` }} onClick={() => goPlayer(p.id)}>{p.name}</td>
                   <td style={{ padding: "4px 6px" }}>{s.PA}</td>
                   <td style={{ padding: "4px 6px" }}>{s.AB}</td>
                   <td style={{ padding: "4px 6px" }}>{s.R}</td>
@@ -2427,6 +2472,114 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome }) {
           </>
         )}
       </Card>
+    </div>
+  );
+}
+
+/* ---------------- PLAYER PROFILE ---------------- */
+function PlayerProfileView({ player, team, loadFinalGamesForTeam, goHome, goTeam }) {
+  const [games, setGames] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [trendStat, setTrendStat] = useState("AVG"); // 'AVG' | 'OPS'
+
+  useEffect(() => {
+    if (!team) return;
+    setLoading(true);
+    loadFinalGamesForTeam(team.id).then((g) => {
+      setGames([...g].sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : 0)));
+      setLoading(false);
+    });
+  }, [team, loadFinalGamesForTeam]);
+
+  if (!player) {
+    return <div style={{ color: C.chalk }}>Player not found. <a onClick={goHome} style={{ color: C.amber, cursor: "pointer" }}>Go home</a></div>;
+  }
+
+  const career = aggregateSeasonStats(player.id, games);
+  const gameLog = games.map((g) => ({ g, s: statsForPlayerInGame(g, player.id) })).filter(({ s }) => s.PA > 0);
+
+  // Cumulative trend: running AVG or OPS after each game, in chronological order.
+  const running = { AB: 0, H: 0, "2B": 0, "3B": 0, HR: 0, BB: 0, HBP: 0, SF: 0, PA: 0 };
+  const trendPoints = gameLog.map(({ g, s }) => {
+    ["AB", "H", "2B", "3B", "HR", "BB", "HBP", "SF", "PA"].forEach((k) => { running[k] += s[k] || 0; });
+    const withR = withRates(running);
+    return { label: g.date.slice(5), value: trendStat === "AVG" ? withR.AVG : withR.OPS };
+  });
+
+  const statBlock = [
+    ["AVG", fmt3(career.AVG)], ["OBP", fmt3(career.OBP)], ["SLG", fmt3(career.SLG)], ["OPS", fmt3(career.OPS)],
+    ["H", career.H], ["HR", career.HR], ["RBI", career.RBI], ["R", career.R],
+    ["BB", career.BB], ["K", career.K], ["XBH", career.XBH], ["ISO", fmt3(career.ISO)],
+  ];
+
+  return (
+    <div>
+      <BackLink onClick={goTeam}>{team ? team.name : "Team"}</BackLink>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "6px 0 16px" }}>
+        {team && <TeamBadge team={team} size={40} />}
+        <div>
+          <h1 style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 28, margin: 0 }}>{player.name}</h1>
+          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 12, color: C.chalkDim }}>#{player.number || "—"} · {team ? team.name : ""}</div>
+        </div>
+      </div>
+
+      {loading && <p style={{ color: C.chalkDim }}>Loading games…</p>}
+
+      {!loading && (
+        <>
+          <Eyebrow>Career stats ({gameLog.length} game{gameLog.length !== 1 ? "s" : ""})</Eyebrow>
+          <Card style={{ marginBottom: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(70px, 1fr))", gap: 12 }}>
+              {statBlock.map(([label, value]) => (
+                <div key={label} style={{ textAlign: "center" }}>
+                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>{label}</div>
+                  <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 18, color: C.chalk, fontWeight: 700 }}>{value}</div>
+                </div>
+              ))}
+            </div>
+          </Card>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <Eyebrow>Trend over the season</Eyebrow>
+            <div style={{ display: "flex", gap: 6 }}>
+              <Btn size="sm" tone={trendStat === "AVG" ? "amber" : "ghost"} onClick={() => setTrendStat("AVG")}>AVG</Btn>
+              <Btn size="sm" tone={trendStat === "OPS" ? "amber" : "ghost"} onClick={() => setTrendStat("OPS")}>OPS</Btn>
+            </div>
+          </div>
+          <Card style={{ marginBottom: 16 }}>
+            <TrendChart points={trendPoints} format={fmt3} />
+          </Card>
+
+          <Eyebrow>Game log</Eyebrow>
+          <Card style={{ overflowX: "auto" }}>
+            {gameLog.length === 0 && <p style={{ color: C.chalkDim, margin: 0 }}>No games with an at-bat yet.</p>}
+            {gameLog.length > 0 && (
+              <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 12.5, minWidth: 520 }}>
+                <thead>
+                  <tr style={{ color: C.amber, textAlign: "left" }}>
+                    {["Date", "Opponent", "AB", "R", "H", "RBI", "BB", "K", "AVG"].map((h) => <th key={h} style={{ padding: "4px 6px", borderBottom: `1px solid ${C.line}55` }}>{h}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...gameLog].reverse().map(({ g, s }) => (
+                    <tr key={g.id} style={{ color: C.chalk }}>
+                      <td style={{ padding: "4px 6px" }}>{g.date}</td>
+                      <td style={{ padding: "4px 6px" }}>{g.opponent}</td>
+                      <td style={{ padding: "4px 6px" }}>{s.AB}</td>
+                      <td style={{ padding: "4px 6px" }}>{s.R}</td>
+                      <td style={{ padding: "4px 6px" }}>{s.H}</td>
+                      <td style={{ padding: "4px 6px" }}>{s.RBI}</td>
+                      <td style={{ padding: "4px 6px" }}>{s.BB}</td>
+                      <td style={{ padding: "4px 6px" }}>{s.K}</td>
+                      <td style={{ padding: "4px 6px" }}>{fmt3(s.AVG)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </Card>
+        </>
+      )}
     </div>
   );
 }
