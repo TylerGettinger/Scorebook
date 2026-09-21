@@ -277,7 +277,7 @@ function GameHighBoard({ title, entries, format }) {
 // Minimal SVG line chart — no charting library needed. points: [{ label, value }]
 // in chronological order. Renders a smooth-ish polyline with a value axis label
 // at the top and the first/last x-axis labels at the bottom.
-function TrendChart({ points, format }) {
+function TrendChart({ points, format, onPointClick, selectedIndex }) {
   const fmt = format || ((v) => v);
   if (!points || points.length === 0) {
     return <p style={{ color: C.chalkDim, fontSize: 13, margin: 0 }}>Not enough games yet to chart a trend.</p>;
@@ -298,7 +298,16 @@ function TrendChart({ points, format }) {
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: 180 }} preserveAspectRatio="none">
       <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} stroke={C.line} strokeWidth="1" opacity="0.4" />
       {coords.length > 1 && <path d={pathD} fill="none" stroke={C.amber} strokeWidth="2.5" />}
-      {coords.map((c, i) => <circle key={i} cx={c.x} cy={c.y} r="3.5" fill={C.amber} stroke={C.ink} strokeWidth="1" />)}
+      {coords.map((c, i) => {
+        const isSelected = i === selectedIndex;
+        return (
+          <g key={i} onClick={() => onPointClick && onPointClick(i)} style={{ cursor: onPointClick ? "pointer" : "default" }}>
+            {/* larger invisible hit-area for easier tapping on mobile */}
+            <circle cx={c.x} cy={c.y} r="14" fill="transparent" />
+            <circle cx={c.x} cy={c.y} r={isSelected ? "6.5" : "3.5"} fill={isSelected ? C.green : C.amber} stroke={C.ink} strokeWidth={isSelected ? "2" : "1"} />
+          </g>
+        );
+      })}
       <text x={PAD} y={16} fontSize="11" fill={C.chalk} fontFamily="Inter, sans-serif">{fmt(maxV)}</text>
       {minV !== maxV && <text x={PAD} y={H - PAD - 4} fontSize="11" fill={C.chalkDim} fontFamily="Inter, sans-serif">{fmt(minV)}</text>}
       <text x={PAD} y={H - 6} fontSize="10" fill={C.chalkDim} fontFamily="Inter, sans-serif">{points[0].label}</text>
@@ -2484,10 +2493,18 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome, goPlayer })
 }
 
 /* ---------------- PLAYER PROFILE ---------------- */
+const TREND_STAT_OPTIONS = [
+  ["AVG", "AVG", "avg"], ["OBP", "OBP", "avg"], ["SLG", "SLG", "avg"], ["OPS", "OPS", "avg"], ["ISO", "ISO", "avg"],
+  ["Hits", "H", "count"], ["Runs", "R", "count"], ["RBI", "RBI", "count"], ["Home Runs", "HR", "count"], ["Extra-Base Hits", "XBH", "count"],
+  ["Walks", "BB", "count"], ["Strikeouts", "K", "count"], ["Walk %", "BBPct", "pct"], ["Strikeout %", "KPct", "pct"],
+];
+const trendFormat = (kind) => (kind === "avg" ? fmt3 : kind === "pct" ? (v) => `${v.toFixed(1)}%` : (v) => Math.round(v));
+
 function PlayerProfileView({ player, team, loadFinalGamesForTeam, goHome, goTeam }) {
   const [games, setGames] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [trendStat, setTrendStat] = useState("AVG"); // 'AVG' | 'OPS'
+  const [trendKey, setTrendKey] = useState("AVG");
+  const [selectedIndex, setSelectedIndex] = useState(null);
 
   useEffect(() => {
     if (!team) return;
@@ -2505,13 +2522,20 @@ function PlayerProfileView({ player, team, loadFinalGamesForTeam, goHome, goTeam
   const career = aggregateSeasonStats(player.id, games);
   const gameLog = games.map((g) => ({ g, s: statsForPlayerInGame(g, player.id) })).filter(({ s }) => s.PA > 0);
 
-  // Cumulative trend: running AVG or OPS after each game, in chronological order.
-  const running = { AB: 0, H: 0, "2B": 0, "3B": 0, HR: 0, BB: 0, HBP: 0, SF: 0, PA: 0 };
+  const trendOption = TREND_STAT_OPTIONS.find(([, key]) => key === trendKey) || TREND_STAT_OPTIONS[0];
+  const fmtTrend = trendFormat(trendOption[2]);
+
+  // Each point carries the cumulative line through that game AND that game's
+  // own box score line, so clicking a dot can show both "this game" and
+  // "career to date" without recomputing anything.
+  const running = { AB: 0, H: 0, "2B": 0, "3B": 0, HR: 0, RBI: 0, BB: 0, HBP: 0, K: 0, SF: 0, R: 0, PA: 0 };
   const trendPoints = gameLog.map(({ g, s }) => {
-    ["AB", "H", "2B", "3B", "HR", "BB", "HBP", "SF", "PA"].forEach((k) => { running[k] += s[k] || 0; });
-    const withR = withRates(running);
-    return { label: g.date.slice(5), value: trendStat === "AVG" ? withR.AVG : withR.OPS };
+    Object.keys(running).forEach((k) => { running[k] += s[k] || 0; });
+    const cumStats = withRates(running);
+    return { label: g.date.slice(5), value: cumStats[trendKey], date: g.date, opponent: g.opponent, gameStats: s, cumStats };
   });
+
+  const selected = selectedIndex != null ? trendPoints[selectedIndex] : null;
 
   const statBlock = [
     ["AVG", fmt3(career.AVG)], ["OBP", fmt3(career.OBP)], ["SLG", fmt3(career.SLG)], ["OPS", fmt3(career.OPS)],
@@ -2546,16 +2570,45 @@ function PlayerProfileView({ player, team, loadFinalGamesForTeam, goHome, goTeam
             </div>
           </Card>
 
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, flexWrap: "wrap", gap: 8 }}>
             <Eyebrow>Trend over the season</Eyebrow>
-            <div style={{ display: "flex", gap: 6 }}>
-              <Btn size="sm" tone={trendStat === "AVG" ? "amber" : "ghost"} onClick={() => setTrendStat("AVG")}>AVG</Btn>
-              <Btn size="sm" tone={trendStat === "OPS" ? "amber" : "ghost"} onClick={() => setTrendStat("OPS")}>OPS</Btn>
-            </div>
+            <select
+              value={trendKey}
+              onChange={(e) => { setTrendKey(e.target.value); setSelectedIndex(null); }}
+              style={{ ...selStyle, width: "auto", padding: "6px 10px", fontSize: 13 }}
+            >
+              {TREND_STAT_OPTIONS.map(([label, key]) => <option key={key} value={key}>{label}</option>)}
+            </select>
           </div>
-          <Card style={{ marginBottom: 16 }}>
-            <TrendChart points={trendPoints} format={fmt3} />
+          <Card style={{ marginBottom: selected ? 0 : 16 }}>
+            <TrendChart points={trendPoints} format={fmtTrend} onPointClick={setSelectedIndex} selectedIndex={selectedIndex} />
+            <p style={{ color: C.chalkDim, fontSize: 11, margin: "8px 0 0" }}>Tap a point to see that game and your stats through that point in the season.</p>
           </Card>
+
+          {selected && (
+            <Card style={{ marginTop: 10, marginBottom: 16, border: `1px solid ${C.green}55` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <Eyebrow>vs {selected.opponent} · {selected.date}</Eyebrow>
+                <Btn size="sm" tone="ghost" onClick={() => setSelectedIndex(null)}>Close</Btn>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                <div>
+                  <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, color: C.amber, letterSpacing: 1, marginBottom: 6 }}>THIS GAME</div>
+                  <div style={{ color: C.chalk, fontSize: 13, lineHeight: 1.8 }}>
+                    {selected.gameStats.AB} AB, {selected.gameStats.H} H, {selected.gameStats.R} R, {selected.gameStats.RBI} RBI<br />
+                    {selected.gameStats.BB} BB, {selected.gameStats.K} K{selected.gameStats.HR > 0 ? `, ${selected.gameStats.HR} HR` : ""}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, color: C.amber, letterSpacing: 1, marginBottom: 6 }}>THROUGH THIS GAME</div>
+                  <div style={{ color: C.chalk, fontSize: 13, lineHeight: 1.8 }}>
+                    {fmt3(selected.cumStats.AVG)} AVG, {fmt3(selected.cumStats.OPS)} OPS<br />
+                    {selected.cumStats.H} H, {selected.cumStats.HR} HR, {selected.cumStats.RBI} RBI, {selected.cumStats.R} R
+                  </div>
+                </div>
+              </div>
+            </Card>
+          )}
 
           <Eyebrow>Game log</Eyebrow>
           <Card style={{ overflowX: "auto" }}>
