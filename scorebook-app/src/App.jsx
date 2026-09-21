@@ -7,18 +7,23 @@ import { supabase } from "./lib/supabaseClient.js";
 --------------------------------------------------------- */
 
 const C = {
-  green: "#1E3D2F",
-  greenDeep: "#142B21",
-  greenLight: "#2F5744",
-  dirt: "#A9682C",
-  dirtLight: "#C98B4A",
-  chalk: "#F5F3EC",
-  chalkDim: "#E7E2D4",
-  amber: "#E8A33D",
-  navy: "#14213D",
-  line: "#C9C2B4",
-  red: "#B3423A",
-  ink: "#26241D",
+  bg: "#0A0E1A",       // page background
+  green: "#22C55E",    // primary accent / brand (buttons, badges)
+  greenDeep: "#0A0E1A", // header bar background (flush with page bg, modern flat look)
+  greenLight: "#141B2E", // card background (dark slate-navy)
+  dirt: "#3B82F6",     // secondary accent (blue) — default button color
+  dirtLight: "#60A5FA", // lighter blue accent
+  chalk: "#F1F5F9",    // primary light text
+  chalkDim: "#8B96AA", // secondary/muted text
+  amber: "#FBBF24",    // highlight accent (live badges, streaks, warnings)
+  navy: "#101B33",     // hero panel background (scoreboard)
+  line: "#232E45",     // subtle border/divider on dark backgrounds
+  red: "#EF4444",      // danger / destructive
+  ink: "#0A0E1A",      // dark text on bright accent backgrounds
+  turf: "#1E3D2F",     // field grass — kept literal regardless of UI theme
+  turfLight: "#2F5744", // infield grass
+  soil: "#A9682C",     // infield dirt
+  soilLight: "#C98B4A", // mound highlight
 };
 
 // A game is assumed to run this many innings when computing ERA (typical for
@@ -222,7 +227,7 @@ function teamRecord(teamId, gameIndex) {
 function RecordBadge({ record, size = 12 }) {
   if (record.played === 0) return null;
   return (
-    <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: size, color: C.chalkDim }}>
+    <span style={{ fontFamily: "Inter, sans-serif", fontSize: size, color: C.chalkDim }}>
       {record.w}-{record.l}{record.t > 0 ? `-${record.t}` : ""}
     </span>
   );
@@ -240,7 +245,7 @@ function Leaderboard({ title, entries, ascending, format }) {
       {sorted.map((e, i) => (
         <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 0", borderBottom: i < sorted.length - 1 ? `1px solid ${C.line}22` : "none" }}>
           <span style={{ color: C.chalk, fontSize: 14 }}>{medals[i]} {e.name}</span>
-          <span style={{ color: C.amber, fontFamily: "IBM Plex Mono, monospace", fontWeight: 700, fontSize: 14 }}>{fmt(e.value)}</span>
+          <span style={{ color: C.amber, fontFamily: "Inter, sans-serif", fontWeight: 700, fontSize: 14 }}>{fmt(e.value)}</span>
         </div>
       ))}
     </Card>
@@ -260,9 +265,9 @@ function GameHighBoard({ title, entries, format }) {
         <div key={e.id} style={{ padding: "6px 0", borderBottom: i < sorted.length - 1 ? `1px solid ${C.line}22` : "none" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ color: C.chalk, fontSize: 14 }}>{medals[i]} {e.name}</span>
-            <span style={{ color: C.amber, fontFamily: "IBM Plex Mono, monospace", fontWeight: 700, fontSize: 14 }}>{fmt(e.value)}</span>
+            <span style={{ color: C.amber, fontFamily: "Inter, sans-serif", fontWeight: 700, fontSize: 14 }}>{fmt(e.value)}</span>
           </div>
-          <div style={{ fontSize: 11, color: C.chalkDim, fontFamily: "IBM Plex Mono, monospace" }}>vs {e.opponent} · {e.date}</div>
+          <div style={{ fontSize: 11, color: C.chalkDim, fontFamily: "Inter, sans-serif" }}>vs {e.opponent} · {e.date}</div>
         </div>
       ))}
     </Card>
@@ -294,10 +299,10 @@ function TrendChart({ points, format }) {
       <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} stroke={C.line} strokeWidth="1" opacity="0.4" />
       {coords.length > 1 && <path d={pathD} fill="none" stroke={C.amber} strokeWidth="2.5" />}
       {coords.map((c, i) => <circle key={i} cx={c.x} cy={c.y} r="3.5" fill={C.amber} stroke={C.ink} strokeWidth="1" />)}
-      <text x={PAD} y={16} fontSize="11" fill={C.chalk} fontFamily="IBM Plex Mono, monospace">{fmt(maxV)}</text>
-      {minV !== maxV && <text x={PAD} y={H - PAD - 4} fontSize="11" fill={C.chalkDim} fontFamily="IBM Plex Mono, monospace">{fmt(minV)}</text>}
-      <text x={PAD} y={H - 6} fontSize="10" fill={C.chalkDim} fontFamily="IBM Plex Mono, monospace">{points[0].label}</text>
-      <text x={W - PAD} y={H - 6} fontSize="10" fill={C.chalkDim} fontFamily="IBM Plex Mono, monospace" textAnchor="end">{points[points.length - 1].label}</text>
+      <text x={PAD} y={16} fontSize="11" fill={C.chalk} fontFamily="Inter, sans-serif">{fmt(maxV)}</text>
+      {minV !== maxV && <text x={PAD} y={H - PAD - 4} fontSize="11" fill={C.chalkDim} fontFamily="Inter, sans-serif">{fmt(minV)}</text>}
+      <text x={PAD} y={H - 6} fontSize="10" fill={C.chalkDim} fontFamily="Inter, sans-serif">{points[0].label}</text>
+      <text x={W - PAD} y={H - 6} fontSize="10" fill={C.chalkDim} fontFamily="Inter, sans-serif" textAnchor="end">{points[points.length - 1].label}</text>
     </svg>
   );
 }
@@ -361,14 +366,14 @@ function pitchingLine(stints) {
 function Btn({ children, onClick, tone = "dirt", size = "md", disabled, style }) {
   const tones = {
     dirt: { bg: C.dirt, fg: C.chalk },
-    green: { bg: C.green, fg: C.chalk },
+    green: { bg: C.green, fg: C.ink },
     amber: { bg: C.amber, fg: C.ink },
     ghost: { bg: "transparent", fg: C.chalk, border: `1px solid ${C.line}` },
     red: { bg: C.red, fg: C.chalk },
     chalk: { bg: C.chalk, fg: C.green },
   };
   const t = tones[tone];
-  const pad = size === "sm" ? "6px 10px" : size === "lg" ? "14px 22px" : "10px 16px";
+  const pad = size === "sm" ? "7px 12px" : size === "lg" ? "15px 24px" : "11px 18px";
   return (
     <button
       onClick={onClick}
@@ -378,13 +383,15 @@ function Btn({ children, onClick, tone = "dirt", size = "md", disabled, style })
         color: t.fg,
         border: t.border || "none",
         padding: pad,
-        borderRadius: 8,
+        borderRadius: 10,
         fontFamily: "Inter, sans-serif",
         fontWeight: 600,
         fontSize: size === "sm" ? 13 : 15,
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.45 : 1,
-        letterSpacing: 0.2,
+        letterSpacing: 0.1,
+        boxShadow: disabled || t.border ? "none" : "0 2px 8px rgba(0,0,0,0.25)",
+        transition: "transform 0.1s ease, filter 0.15s ease",
         ...style,
       }}
     >
@@ -394,14 +401,14 @@ function Btn({ children, onClick, tone = "dirt", size = "md", disabled, style })
 }
 function Card({ children, style }) {
   return (
-    <div style={{ background: C.greenLight, border: `1px solid ${C.line}33`, borderRadius: 12, padding: 18, ...style }}>
+    <div style={{ background: C.greenLight, border: `1px solid ${C.line}`, borderRadius: 16, padding: 18, boxShadow: "0 4px 18px rgba(0,0,0,0.28)", ...style }}>
       {children}
     </div>
   );
 }
 function Eyebrow({ children }) {
   return (
-    <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: C.amber, marginBottom: 6 }}>
+    <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: C.amber, marginBottom: 6 }}>
       {children}
     </div>
   );
@@ -421,13 +428,13 @@ function GameField({ runners, hasBatter, pitchTrigger, flight }) {
   return (
     <svg viewBox="0 0 300 300" style={{ width: 250, height: 250 }}>
       {/* outfield grass */}
-      <path d="M 75,205 Q 20,90 150,40 Q 280,90 225,205 Z" fill={C.green} />
+      <path d="M 75,205 Q 20,90 150,40 Q 280,90 225,205 Z" fill={C.turf} />
       {/* infield dirt */}
-      <polygon points="150,300 255,205 150,100 45,205" fill={C.dirt} opacity="0.92" />
+      <polygon points="150,300 255,205 150,100 45,205" fill={C.soil} opacity="0.92" />
       {/* infield grass */}
-      <polygon points="150,280 225,205 150,130 75,205" fill={C.greenLight} />
+      <polygon points="150,280 225,205 150,130 75,205" fill={C.turfLight} />
       {/* mound */}
-      <circle cx={FIELD_MOUND[0]} cy={FIELD_MOUND[1]} r={15} fill={C.dirt} stroke={C.dirtLight} strokeWidth="1" />
+      <circle cx={FIELD_MOUND[0]} cy={FIELD_MOUND[1]} r={15} fill={C.soil} stroke={C.soilLight} strokeWidth="1" />
       <rect x={FIELD_MOUND[0] - 6} y={FIELD_MOUND[1] - 2} width={12} height={4} fill={C.chalk} />
       {/* pitcher figure */}
       <circle cx={FIELD_MOUND[0]} cy={FIELD_MOUND[1] - 14} r={5.5} fill={C.ink} />
@@ -442,12 +449,12 @@ function GameField({ runners, hasBatter, pitchTrigger, flight }) {
           height="18"
           transform={`rotate(45 ${FIELD_BASE_XY[n][0]} ${FIELD_BASE_XY[n][1]})`}
           fill={C.chalk}
-          stroke={C.dirt}
+          stroke={C.soil}
           strokeWidth="2"
         />
       ))}
       {/* home plate */}
-      <polygon points="140,272 160,272 160,284 150,292 140,284" fill={C.chalk} stroke={C.dirt} strokeWidth="1.5" />
+      <polygon points="140,272 160,272 160,284 150,292 140,284" fill={C.chalk} stroke={C.soil} strokeWidth="1.5" />
       {hasBatter && <circle cx={FIELD_HOME[0] - 16} cy={FIELD_HOME[1] - 6} r={6} fill={C.amber} stroke={C.ink} strokeWidth="1.5" />}
 
       {/* pitch animation: ball travels mound -> plate on every ball/strike tap */}
@@ -473,7 +480,7 @@ function GameField({ runners, hasBatter, pitchTrigger, flight }) {
           <g key={r.key}>
             <circle cx={x} cy={y - 4} r="9" fill={C.amber} stroke={C.ink} strokeWidth="1.5" style={{ transition: "cx 0.6s ease, cy 0.6s ease" }} />
             {r.label && (
-              <text x={x} y={y + 22} textAnchor="middle" fill={C.amber} fontFamily="IBM Plex Mono, monospace" fontSize="11" fontWeight="700" style={{ transition: "x 0.6s ease, y 0.6s ease" }}>
+              <text x={x} y={y + 22} textAnchor="middle" fill={C.amber} fontFamily="Inter, sans-serif" fontSize="11" fontWeight="700" style={{ transition: "x 0.6s ease, y 0.6s ease" }}>
                 {r.label}
               </text>
             )}
@@ -507,7 +514,7 @@ function LockScreen({ onUnlock }) {
     <Wrap>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "80vh", padding: 20 }}>
         <Card style={{ maxWidth: 320, width: "100%" }}>
-          <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 24, color: C.chalk, marginBottom: 10 }}>SCOREBOOK</div>
+          <div style={{ fontFamily: "Inter, sans-serif", fontSize: 24, color: C.chalk, marginBottom: 10 }}>SCOREBOOK</div>
           <p style={{ color: C.chalkDim, fontSize: 13, marginBottom: 12 }}>Enter the family passcode to continue.</p>
           <input
             type="password"
@@ -1132,9 +1139,9 @@ function Scorebook() {
 /* ---------------- layout shells ---------------- */
 function Wrap({ children }) {
   return (
-    <div style={{ background: C.green, minHeight: "100vh", fontFamily: "Inter, sans-serif" }}>
+    <div style={{ background: C.bg, minHeight: "100vh", fontFamily: "Inter, sans-serif" }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
         * { box-sizing: border-box; }
         html, body, #root { height: 100%; }
         body { margin: 0; }
@@ -1155,8 +1162,8 @@ function TopBar({ scorekeeper, setScorekeeper, setView }) {
     <div style={{ background: C.greenDeep, borderBottom: `1px solid ${C.line}33`, position: "sticky", top: 0, zIndex: 10 }}>
       <div style={{ maxWidth: 1080, margin: "0 auto", padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
         <div onClick={() => setView("home")} style={{ cursor: "pointer", display: "flex", alignItems: "baseline", gap: 8 }}>
-          <span style={{ fontFamily: "Oswald, sans-serif", fontWeight: 700, fontSize: 22, color: C.chalk, letterSpacing: 0.5 }}>SCOREBOOK</span>
-          <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 11, color: C.amber, letterSpacing: 1.5 }}>PRIVATE LEAGUE</span>
+          <span style={{ fontFamily: "Inter, sans-serif", fontWeight: 700, fontSize: 22, color: C.chalk, letterSpacing: 0.5 }}>SCOREBOOK</span>
+          <span style={{ fontFamily: "Inter, sans-serif", fontSize: 11, color: C.amber, letterSpacing: 1.5 }}>PRIVATE LEAGUE</span>
         </div>
         <button
           onClick={() => setScorekeeper(!scorekeeper)}
@@ -1166,7 +1173,7 @@ function TopBar({ scorekeeper, setScorekeeper, setView }) {
             border: `1px solid ${scorekeeper ? C.amber : C.line}`,
             borderRadius: 20,
             padding: "6px 14px",
-            fontFamily: "IBM Plex Mono, monospace",
+            fontFamily: "Inter, sans-serif",
             fontSize: 12,
             fontWeight: 600,
             cursor: "pointer",
@@ -1188,7 +1195,7 @@ function TeamBadge({ team, size = 32 }) {
   }
   return (
     <div style={{ width: size, height: size, borderRadius: "50%", background: color, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-      <span style={{ fontFamily: "Oswald, sans-serif", fontWeight: 700, fontSize: size * 0.42, color: C.ink }}>
+      <span style={{ fontFamily: "Inter, sans-serif", fontWeight: 700, fontSize: size * 0.42, color: C.ink }}>
         {team && team.name ? team.name.trim()[0].toUpperCase() : "?"}
       </span>
     </div>
@@ -1203,7 +1210,7 @@ function HomeView({ teams, gameIndex, scorekeeper, addTeam, openTeam, openGame }
     <div>
       <div style={{ marginBottom: 28 }}>
         <Eyebrow>Season {new Date().getFullYear()}</Eyebrow>
-        <h1 style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 34, margin: 0, fontWeight: 600 }}>Track every at-bat, keep it in the family.</h1>
+        <h1 style={{ fontFamily: "Inter, sans-serif", color: C.chalk, fontSize: 34, margin: 0, fontWeight: 600 }}>Track every at-bat, keep it in the family.</h1>
         <p style={{ color: C.chalkDim, marginTop: 8, maxWidth: 560, lineHeight: 1.5 }}>
           Log games live, hold season stats for every player, and send a recap to whoever's not in the stands.
         </p>
@@ -1214,8 +1221,8 @@ function HomeView({ teams, gameIndex, scorekeeper, addTeam, openTeam, openGame }
           <Eyebrow>Live now</Eyebrow>
           {liveGames.map((g) => (
             <div key={g.id} onClick={() => openGame(g.id)} style={{ cursor: "pointer", background: C.amber, borderRadius: 10, padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-              <span style={{ fontFamily: "Oswald, sans-serif", fontWeight: 600, color: C.ink }}>vs {g.opponent}</span>
-              <span style={{ fontFamily: "IBM Plex Mono, monospace", fontWeight: 600, color: C.ink }}>{g.ourScore} – {g.theirScore}</span>
+              <span style={{ fontFamily: "Inter, sans-serif", fontWeight: 600, color: C.ink }}>vs {g.opponent}</span>
+              <span style={{ fontFamily: "Inter, sans-serif", fontWeight: 600, color: C.ink }}>{g.ourScore} – {g.theirScore}</span>
             </div>
           ))}
         </div>
@@ -1236,9 +1243,9 @@ function HomeView({ teams, gameIndex, scorekeeper, addTeam, openTeam, openGame }
               <div onClick={() => openTeam(t.id)} style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <TeamBadge team={t} />
                 <div>
-                  <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 20, color: C.chalk, fontWeight: 600 }}>{t.name}</div>
+                  <div style={{ fontFamily: "Inter, sans-serif", fontSize: 20, color: C.chalk, fontWeight: 600 }}>{t.name}</div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
-                    <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 12, color: C.amber }}>{tGames.length} game{tGames.length !== 1 ? "s" : ""} logged</span>
+                    <span style={{ fontFamily: "Inter, sans-serif", fontSize: 12, color: C.amber }}>{tGames.length} game{tGames.length !== 1 ? "s" : ""} logged</span>
                     {record.played > 0 && <span style={{ color: C.chalkDim, fontSize: 11 }}>·</span>}
                     <RecordBadge record={record} />
                   </div>
@@ -1288,7 +1295,7 @@ function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, 
       <BackLink onClick={goHome}>All teams</BackLink>
       <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "6px 0 16px", flexWrap: "wrap" }}>
         <TeamBadge team={team} size={44} />
-        <h1 style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 30, margin: 0 }}>{team.name}</h1>
+        <h1 style={{ fontFamily: "Inter, sans-serif", color: C.chalk, fontSize: 30, margin: 0 }}>{team.name}</h1>
         {teamRecord(team.id, games).played > 0 && (
           <span style={{ background: `${C.amber}22`, border: `1px solid ${C.amber}55`, borderRadius: 20, padding: "4px 12px" }}>
             <RecordBadge record={teamRecord(team.id, games)} size={14} />
@@ -1318,7 +1325,7 @@ function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, 
               </div>
             </div>
             <div style={{ marginTop: 14 }}>
-              <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 11, letterSpacing: 1, color: C.chalkDim, marginBottom: 8, textTransform: "uppercase" }}>Team color</div>
+              <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: 1, color: C.chalkDim, marginBottom: 8, textTransform: "uppercase" }}>Team color</div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 {TEAM_COLORS.map((c) => (
                   <button
@@ -1348,7 +1355,7 @@ function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, 
         {players.length === 0 && <p style={{ color: C.chalkDim, margin: 0 }}>No players yet.</p>}
         {players.map((p) => (
           <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: `1px solid ${C.line}22` }}>
-            <span onClick={() => goPlayer(p.id)} style={{ color: C.chalk, cursor: "pointer" }}><span style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, marginRight: 8 }}>#{p.number || "—"}</span>{p.name}</span>
+            <span onClick={() => goPlayer(p.id)} style={{ color: C.chalk, cursor: "pointer" }}><span style={{ fontFamily: "Inter, sans-serif", color: C.amber, marginRight: 8 }}>#{p.number || "—"}</span>{p.name}</span>
             {scorekeeper && <button onClick={() => removePlayer(p.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", fontSize: 13 }}>Remove</button>}
           </div>
         ))}
@@ -1366,14 +1373,14 @@ function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, 
         {games.map((g) => (
           <div key={g.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${C.line}22`, gap: 10 }}>
             <div onClick={() => openGame(g.id)} style={{ cursor: "pointer", flex: 1 }}>
-              <div style={{ color: C.chalk, fontFamily: "Oswald, sans-serif", fontWeight: 500 }}>
+              <div style={{ color: C.chalk, fontFamily: "Inter, sans-serif", fontWeight: 500 }}>
                 vs {g.opponent}
-                {g.source === "manual" && <span style={{ fontSize: 10, color: C.chalkDim, fontFamily: "IBM Plex Mono, monospace", marginLeft: 8, border: `1px solid ${C.line}`, borderRadius: 8, padding: "1px 6px" }}>MANUAL</span>}
+                {g.source === "manual" && <span style={{ fontSize: 10, color: C.chalkDim, fontFamily: "Inter, sans-serif", marginLeft: 8, border: `1px solid ${C.line}`, borderRadius: 8, padding: "1px 6px" }}>MANUAL</span>}
               </div>
-              <div style={{ color: C.chalkDim, fontSize: 12, fontFamily: "IBM Plex Mono, monospace" }}>{g.date}</div>
+              <div style={{ color: C.chalkDim, fontSize: 12, fontFamily: "Inter, sans-serif" }}>{g.date}</div>
             </div>
             <div onClick={() => openGame(g.id)} style={{ cursor: "pointer", textAlign: "right" }}>
-              <div style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, fontWeight: 600 }}>{g.ourScore} – {g.theirScore}</div>
+              <div style={{ fontFamily: "Inter, sans-serif", color: C.amber, fontWeight: 600 }}>{g.ourScore} – {g.theirScore}</div>
               <div style={{ fontSize: 11, color: g.status === "live" ? C.amber : C.chalkDim, textTransform: "uppercase", letterSpacing: 1 }}>{g.status}</div>
             </div>
             {scorekeeper && (
@@ -1392,7 +1399,7 @@ function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, 
   );
 }
 function BackLink({ onClick, children = "Back" }) {
-  return <div onClick={onClick} style={{ cursor: "pointer", color: C.amber, fontSize: 13, fontFamily: "IBM Plex Mono, monospace", marginBottom: 4 }}>← {children}</div>;
+  return <div onClick={onClick} style={{ cursor: "pointer", color: C.amber, fontSize: 13, fontFamily: "Inter, sans-serif", marginBottom: 4 }}>← {children}</div>;
 }
 
 /* ---------------- NEW GAME ---------------- */
@@ -1408,7 +1415,7 @@ function NewGameView({ teams, players, defaultTeamId, onCancel, onStart }) {
   return (
     <div>
       <BackLink onClick={onCancel}>Cancel</BackLink>
-      <h1 style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 30, margin: "6px 0 16px" }}>New Game</h1>
+      <h1 style={{ fontFamily: "Inter, sans-serif", color: C.chalk, fontSize: 30, margin: "6px 0 16px" }}>New Game</h1>
       <Card style={{ marginBottom: 16 }}>
         <Field label="Team">
           <select value={teamId} onChange={(e) => { setTeamId(e.target.value); setLineup([]); }} style={selStyle}>
@@ -1438,7 +1445,7 @@ function NewGameView({ teams, players, defaultTeamId, onCancel, onStart }) {
           const p = teamPlayers.find((x) => x.id === id);
           return (
             <div key={id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "5px 0" }}>
-              <span style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, width: 24 }}>{i + 1}.</span>
+              <span style={{ fontFamily: "Inter, sans-serif", color: C.amber, width: 24 }}>{i + 1}.</span>
               <span style={{ color: C.chalk, flex: 1 }}>{p ? p.name : ""}</span>
               <button onClick={() => move(id, -1)} style={arrowStyle}>▲</button>
               <button onClick={() => move(id, 1)} style={arrowStyle}>▼</button>
@@ -1485,7 +1492,7 @@ function OldGameView({ team, players, existingGame, onCancel, onSave }) {
   return (
     <div>
       <BackLink onClick={onCancel}>Cancel</BackLink>
-      <h1 style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 30, margin: "6px 0 16px" }}>{isEdit ? "Edit Old Game" : "Add Old Game"}</h1>
+      <h1 style={{ fontFamily: "Inter, sans-serif", color: C.chalk, fontSize: 30, margin: "6px 0 16px" }}>{isEdit ? "Edit Old Game" : "Add Old Game"}</h1>
       <p style={{ color: C.chalkDim, fontSize: 13, marginTop: -10, marginBottom: 16, maxWidth: 560 }}>
         For a game you didn't track live in Scorebook — enter the final score and each player's stat line. It's saved as a finished game and folds right into season stats alongside your live-tracked games.
       </p>
@@ -1515,7 +1522,7 @@ function OldGameView({ team, players, existingGame, onCancel, onSave }) {
         </div>
         {selected.length > 0 && (
           <div style={{ overflowX: "auto" }}>
-            <table style={{ borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 12, minWidth: 640 }}>
+            <table style={{ borderCollapse: "collapse", fontFamily: "Inter, sans-serif", fontSize: 12, minWidth: 640 }}>
               <thead>
                 <tr style={{ color: C.amber, textAlign: "left" }}>
                   <th style={{ padding: "4px 8px", position: "sticky", left: 0, background: C.greenLight }}>Player</th>
@@ -1558,7 +1565,7 @@ const arrowStyle = { background: "none", border: `1px solid ${C.line}`, color: C
 function Field({ label, children }) {
   return (
     <div style={{ marginBottom: 12 }}>
-      <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 11, letterSpacing: 1, color: C.chalkDim, marginBottom: 5, textTransform: "uppercase" }}>{label}</div>
+      <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11, letterSpacing: 1, color: C.chalkDim, marginBottom: 5, textTransform: "uppercase" }}>{label}</div>
       {children}
     </div>
   );
@@ -1576,16 +1583,16 @@ function BattingPreview({ lineup, players, currentBatterIndex }) {
       <Eyebrow>Batting order</Eyebrow>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
         <div>
-          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.amber, letterSpacing: 1, marginBottom: 3 }}>AT BAT</div>
-          <div style={{ color: C.chalk, fontFamily: "Oswald, sans-serif", fontSize: 15 }}>{at(0)}</div>
+          <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, color: C.amber, letterSpacing: 1, marginBottom: 3 }}>AT BAT</div>
+          <div style={{ color: C.chalk, fontFamily: "Inter, sans-serif", fontSize: 15 }}>{at(0)}</div>
         </div>
         <div>
-          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1, marginBottom: 3 }}>ON DECK</div>
-          <div style={{ color: C.chalkDim, fontFamily: "Oswald, sans-serif", fontSize: 15 }}>{at(1)}</div>
+          <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, color: C.chalkDim, letterSpacing: 1, marginBottom: 3 }}>ON DECK</div>
+          <div style={{ color: C.chalkDim, fontFamily: "Inter, sans-serif", fontSize: 15 }}>{at(1)}</div>
         </div>
         <div>
-          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1, marginBottom: 3 }}>IN THE HOLE</div>
-          <div style={{ color: C.chalkDim, fontFamily: "Oswald, sans-serif", fontSize: 15 }}>{at(2)}</div>
+          <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, color: C.chalkDim, letterSpacing: 1, marginBottom: 3 }}>IN THE HOLE</div>
+          <div style={{ color: C.chalkDim, fontFamily: "Inter, sans-serif", fontSize: 15 }}>{at(2)}</div>
         </div>
       </div>
     </Card>
@@ -1611,7 +1618,7 @@ function SubstitutionsPanel({ game, team, players, substitutePlayer }) {
               const p = players.find((x) => x.id === pid);
               return (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span style={{ fontFamily: "IBM Plex Mono, monospace", color: C.amber, width: 22 }}>{i + 1}.</span>
+                  <span style={{ fontFamily: "Inter, sans-serif", color: C.amber, width: 22 }}>{i + 1}.</span>
                   <span style={{ color: C.chalk, fontSize: 13, minWidth: 110 }}>{p ? p.name : "—"}</span>
                   {bench.length > 0 && (
                     <select
@@ -1629,12 +1636,12 @@ function SubstitutionsPanel({ game, team, players, substitutePlayer }) {
           </div>
           {game.substitutions.length > 0 && (
             <div style={{ borderTop: `1px solid ${C.line}22`, paddingTop: 10 }}>
-              <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1, marginBottom: 6 }}>SUBSTITUTION LOG</div>
+              <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, color: C.chalkDim, letterSpacing: 1, marginBottom: 6 }}>SUBSTITUTION LOG</div>
               {game.substitutions.map((s, i) => {
                 const inP = players.find((x) => x.id === s.inPlayerId);
                 const outP = players.find((x) => x.id === s.outPlayerId);
                 return (
-                  <div key={i} style={{ fontSize: 12, color: C.chalkDim, fontFamily: "IBM Plex Mono, monospace" }}>
+                  <div key={i} style={{ fontSize: 12, color: C.chalkDim, fontFamily: "Inter, sans-serif" }}>
                     {s.half === "top" ? "T" : "B"}{s.inning} — {inP ? inP.name : "?"} in for {outP ? outP.name : "?"} (slot {s.slotIndex + 1})
                   </div>
                 );
@@ -1658,18 +1665,18 @@ function PitchCounter({ title, pitcherControl, balls, strikes, onBall, onStrike,
       <div style={{ fontSize: 11, color: C.chalkDim, marginBottom: 10 }}>Tap here for every pitch — it updates the live count above and this pitcher's game totals together.</div>
       <div style={{ display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
         <div style={{ textAlign: "center" }}>
-          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>BALLS</div>
-          <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 26, color: C.chalk, fontWeight: 700 }}>{balls}</div>
+          <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>BALLS</div>
+          <div style={{ fontFamily: "Inter, sans-serif", fontSize: 26, color: C.chalk, fontWeight: 700 }}>{balls}</div>
           <Btn size="sm" onClick={onBall} disabled={disabled}>+1 Ball</Btn>
         </div>
         <div style={{ textAlign: "center" }}>
-          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>STRIKES</div>
-          <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 26, color: C.chalk, fontWeight: 700 }}>{strikes}</div>
+          <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>STRIKES</div>
+          <div style={{ fontFamily: "Inter, sans-serif", fontSize: 26, color: C.chalk, fontWeight: 700 }}>{strikes}</div>
           <Btn size="sm" tone="amber" onClick={onStrike} disabled={disabled}>+1 Strike</Btn>
         </div>
         <div style={{ textAlign: "center", marginLeft: "auto" }}>
-          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>PITCHES / STRIKE%</div>
-          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 18, color: C.amber, fontWeight: 700 }}>{pitches} · {pct}%</div>
+          <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>PITCHES / STRIKE%</div>
+          <div style={{ fontFamily: "Inter, sans-serif", fontSize: 18, color: C.amber, fontWeight: 700 }}>{pitches} · {pct}%</div>
         </div>
       </div>
       {onUndo && (
@@ -1694,7 +1701,7 @@ function BoxScoreTable({ game, players }) {
   const rows = order.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: statsForPlayerInGame(game, p.id) }));
   return (
     <div style={{ overflowX: "auto" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 13 }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Inter, sans-serif", fontSize: 13 }}>
         <thead><tr style={{ color: C.amber, textAlign: "left" }}>{["Player", "AB", "R", "H", "RBI", "BB", "K", "AVG"].map((h) => <th key={h} style={{ padding: "4px 8px", borderBottom: `1px solid ${C.line}55` }}>{h}</th>)}</tr></thead>
         <tbody>{rows.map(({ p, s }) => (
           <tr key={p.id} style={{ color: C.chalk }}>
@@ -1720,12 +1727,12 @@ function PitchingLineDisplay({ game, players }) {
   if (names.length === 0) return null;
   return (
     <div style={{ marginTop: 12 }}>
-      <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1, marginBottom: 4 }}>PITCHING</div>
+      <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, color: C.chalkDim, letterSpacing: 1, marginBottom: 4 }}>PITCHING</div>
       {names.map((pid) => {
         const player = players.find((x) => x.id === pid);
         const line = pitchingLine(byPlayer[pid]);
         return (
-          <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>
+          <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "Inter, sans-serif" }}>
             {player ? player.name : "?"} — {ipDisplay(line.outs)} IP, {line.er} ER, ERA {line.era.toFixed(2)}, {line.strikePct.toFixed(0)}% strikes ({line.strikes}/{line.pitches})
           </div>
         );
@@ -1784,18 +1791,18 @@ function LiveGameView(props) {
               <GameField runners={runners} hasBatter={usBatting} pitchTrigger={pitchTrigger} flight={flight} />
               <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 10 }}>
                 <div style={{ textAlign: "center" }}>
-                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>COUNT</div>
-                  <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 28, fontWeight: 700, color: C.amber }}>{game.count.balls}-{game.count.strikes}</div>
+                  <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>COUNT</div>
+                  <div style={{ fontFamily: "Inter, sans-serif", fontSize: 28, fontWeight: 700, color: C.amber }}>{game.count.balls}-{game.count.strikes}</div>
                 </div>
                 <div style={{ width: 1, background: `${C.line}55` }} />
                 <div style={{ textAlign: "center" }}>
-                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>OUTS</div>
-                  <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 28, fontWeight: 700, color: C.chalk }}>{game.outs}<span style={{ fontSize: 16, color: C.chalkDim }}>/3</span></div>
+                  <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>OUTS</div>
+                  <div style={{ fontFamily: "Inter, sans-serif", fontSize: 28, fontWeight: 700, color: C.chalk }}>{game.outs}<span style={{ fontSize: 16, color: C.chalkDim }}>/3</span></div>
                 </div>
               </div>
               {pendingOutcome && (
                 <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.line}22` }}>
-                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 11, color: C.amber, letterSpacing: 1, marginBottom: 8, textAlign: "center" }}>WHERE'D IT GO?</div>
+                  <div style={{ fontFamily: "Inter, sans-serif", fontSize: 11, color: C.amber, letterSpacing: 1, marginBottom: 8, textAlign: "center" }}>WHERE'D IT GO?</div>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6, justifyContent: "center" }}>
                     {Object.keys(FIELD_ZONES).map((z) => (
                       <button
@@ -1850,13 +1857,13 @@ function LiveGameView(props) {
           {scorekeeper && usBatting && (
             <Card style={{ marginBottom: 16 }}>
               <Eyebrow>At bat</Eyebrow>
-              <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 24, color: C.chalk, marginBottom: 4 }}>#{batter ? batter.number || "—" : "—"} {batter ? batter.name : "—"}</div>
-              <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 12, color: C.chalkDim, marginBottom: 12 }}>
+              <div style={{ fontFamily: "Inter, sans-serif", fontSize: 24, color: C.chalk, marginBottom: 4 }}>#{batter ? batter.number || "—" : "—"} {batter ? batter.name : "—"}</div>
+              <div style={{ fontFamily: "Inter, sans-serif", fontSize: 12, color: C.chalkDim, marginBottom: 12 }}>
                 On deck: {(() => { const p = players.find((x) => x.id === game.lineup[(game.currentBatterIndex + 1) % game.lineup.length]); return p ? p.name : "—"; })()}
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(80px, 1fr))", gap: 8 }}>
                 {OUTCOMES.map((o) => (
-                  <button key={o.key} title={o.full} onClick={() => (["1B", "2B", "3B", "HR"].includes(o.key) ? beginLocationPick("offense", o.key) : recordOutcome(o.key))} style={{ padding: "14px 6px", borderRadius: 10, border: `1px solid ${C.line}55`, background: o.out ? C.navy : o.hit ? C.amber : C.dirt, color: o.out ? C.chalk : o.hit ? C.ink : C.chalk, fontFamily: "IBM Plex Mono, monospace", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
+                  <button key={o.key} title={o.full} onClick={() => (["1B", "2B", "3B", "HR"].includes(o.key) ? beginLocationPick("offense", o.key) : recordOutcome(o.key))} style={{ padding: "14px 6px", borderRadius: 10, border: `1px solid ${C.line}55`, background: o.out ? C.navy : o.hit ? C.amber : C.dirt, color: o.out ? C.chalk : o.hit ? C.ink : C.chalk, fontFamily: "Inter, sans-serif", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
                     {o.label}
                   </button>
                 ))}
@@ -1949,7 +1956,7 @@ function LiveGameView(props) {
                       <option value="">Select pitcher…</option>
                       {defensivePlayers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                     </select>
-                    {ourPitcher && <span style={{ fontSize: 12, color: C.chalkDim, fontFamily: "IBM Plex Mono, monospace" }}>Now pitching: {ourPitcher.name}</span>}
+                    {ourPitcher && <span style={{ fontSize: 12, color: C.chalkDim, fontFamily: "Inter, sans-serif" }}>Now pitching: {ourPitcher.name}</span>}
                   </div>
                 }
                 balls={game.pitching.ourBalls}
@@ -1974,7 +1981,7 @@ function LiveGameView(props) {
                           {POSITIONS.map((pos) => <option key={pos} value={pos}>{pos}</option>)}
                         </select>
                         {["PO", "A", "E"].map((stat) => (
-                          <span key={stat} style={{ display: "flex", alignItems: "center", gap: 3, fontFamily: "IBM Plex Mono, monospace", fontSize: 12 }}>
+                          <span key={stat} style={{ display: "flex", alignItems: "center", gap: 3, fontFamily: "Inter, sans-serif", fontSize: 12 }}>
                             <button onClick={() => bumpFielding(p.id, stat, -1)} style={miniBtn}>-</button>
                             <span style={{ color: C.amber, minWidth: 26, textAlign: "center" }}>{stat} {f[stat]}</span>
                             <button onClick={() => bumpFielding(p.id, stat, 1)} style={miniBtn}>+</button>
@@ -2011,7 +2018,7 @@ function LiveGameView(props) {
               return (
                 <div key={p.id} style={{ padding: "6px 0", borderBottom: `1px solid ${C.line}22`, fontSize: 13 }}>
                   <div style={{ color: C.chalk }}>{p.half === "top" ? "T" : "B"}{p.inning} — {pl ? pl.name : "?"}</div>
-                  <div style={{ color: C.amber, fontFamily: "IBM Plex Mono, monospace", fontSize: 12 }}>{o.full}{p.rbi ? ` · ${p.rbi} RBI` : ""}</div>
+                  <div style={{ color: C.amber, fontFamily: "Inter, sans-serif", fontSize: 12 }}>{o.full}{p.rbi ? ` · ${p.rbi} RBI` : ""}</div>
                 </div>
               );
             })}
@@ -2049,7 +2056,7 @@ function ScoreHeader({ game, team }) {
           color: isFinal ? C.chalk : C.ink,
           borderRadius: 8,
           padding: "6px 16px",
-          fontFamily: "Oswald, sans-serif",
+          fontFamily: "Inter, sans-serif",
           fontWeight: 700,
           fontSize: 26,
           letterSpacing: 1,
@@ -2064,11 +2071,11 @@ function ScoreHeader({ game, team }) {
             <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
               {row.us && <TeamBadge team={team} size={26} />}
               {row.batting && <BatIcon color={row.us ? accent : undefined} />}
-              <div style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 20, fontWeight: 500, minWidth: 0, wordBreak: "break-word", lineHeight: 1.2 }}>
+              <div style={{ fontFamily: "Inter, sans-serif", color: C.chalk, fontSize: 20, fontWeight: 500, minWidth: 0, wordBreak: "break-word", lineHeight: 1.2 }}>
                 {row.name}
               </div>
             </div>
-            <div style={{ fontFamily: "IBM Plex Mono, monospace", color: C.chalk, fontSize: 40, fontWeight: 800, minWidth: 56, textAlign: "right" }}>
+            <div style={{ fontFamily: "Inter, sans-serif", color: C.chalk, fontSize: 40, fontWeight: 800, minWidth: 56, textAlign: "right" }}>
               {row.score}
             </div>
           </div>
@@ -2140,7 +2147,7 @@ function SummaryView({ game, team, players, scorekeeper, generating, generateRec
               const inP = players.find((x) => x.id === s.inPlayerId);
               const outP = players.find((x) => x.id === s.outPlayerId);
               return (
-                <div key={i} style={{ fontSize: 13, color: C.chalk, fontFamily: "IBM Plex Mono, monospace" }}>
+                <div key={i} style={{ fontSize: 13, color: C.chalk, fontFamily: "Inter, sans-serif" }}>
                   {s.half === "top" ? "T" : "B"}{s.inning} — {inP ? inP.name : "?"} in for {outP ? outP.name : "?"} (slot {s.slotIndex + 1})
                 </div>
               );
@@ -2155,7 +2162,7 @@ function SummaryView({ game, team, players, scorekeeper, generating, generateRec
           <Card style={{ marginBottom: 16 }}>
             <PitchingLineDisplay game={game} players={players} />
             {game.pitching.theirName && (
-              <div style={{ color: C.chalkDim, fontSize: 13, fontFamily: "IBM Plex Mono, monospace", marginTop: 8 }}>
+              <div style={{ color: C.chalkDim, fontSize: 13, fontFamily: "Inter, sans-serif", marginTop: 8 }}>
                 {game.opponent} — {game.pitching.theirName}: {game.pitching.theirBalls + game.pitching.theirStrikes} pitches, {game.pitching.theirStrikes} strikes
                 ({(game.pitching.theirBalls + game.pitching.theirStrikes) > 0 ? Math.round((game.pitching.theirStrikes / (game.pitching.theirBalls + game.pitching.theirStrikes)) * 100) : 0}%)
               </div>
@@ -2164,7 +2171,7 @@ function SummaryView({ game, team, players, scorekeeper, generating, generateRec
               <div style={{ display: "flex", flexDirection: "column", gap: 3, marginTop: 10 }}>
                 {Object.entries(game.fielding).filter(([, f]) => f.PO || f.A || f.E).map(([pid, f]) => {
                   const p = players.find((x) => x.id === pid);
-                  return <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>{p ? p.name : "?"} — {f.PO} PO, {f.A} A, {f.E} E</div>;
+                  return <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "Inter, sans-serif" }}>{p ? p.name : "?"} — {f.PO} PO, {f.A} A, {f.E} E</div>;
                 })}
               </div>
             )}
@@ -2255,7 +2262,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome, goPlayer })
   return (
     <div>
       <BackLink onClick={goHome}>Home</BackLink>
-      <h1 style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 30, margin: "6px 0 16px" }}>Season Stats</h1>
+      <h1 style={{ fontFamily: "Inter, sans-serif", color: C.chalk, fontSize: 30, margin: "6px 0 16px" }}>Season Stats</h1>
 
       <Field label="Team">
         <select value={teamId} onChange={(e) => setTeamId(e.target.value)} style={selStyle}>
@@ -2275,7 +2282,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome, goPlayer })
           <button
             key={mode}
             onClick={() => setRangeMode(mode)}
-            style={{ padding: "5px 12px", borderRadius: 14, fontSize: 12, fontFamily: "IBM Plex Mono, monospace", border: `1px solid ${rangeMode === mode ? C.amber : C.line}`, background: rangeMode === mode ? C.amber : "transparent", color: rangeMode === mode ? C.ink : C.chalkDim, cursor: "pointer", fontWeight: 600 }}
+            style={{ padding: "5px 12px", borderRadius: 14, fontSize: 12, fontFamily: "Inter, sans-serif", border: `1px solid ${rangeMode === mode ? C.amber : C.line}`, background: rangeMode === mode ? C.amber : "transparent", color: rangeMode === mode ? C.ink : C.chalkDim, cursor: "pointer", fontWeight: 600 }}
           >
             {label}
           </button>
@@ -2354,7 +2361,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome, goPlayer })
         <>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
         {sortable.map(([label, key]) => (
-          <button key={key} onClick={() => setSortKey(key)} style={{ padding: "4px 10px", borderRadius: 14, fontSize: 12, fontFamily: "IBM Plex Mono, monospace", border: `1px solid ${sortKey === key ? C.amber : C.line}`, background: sortKey === key ? C.amber : "transparent", color: sortKey === key ? C.ink : C.chalkDim, cursor: "pointer" }}>{label}</button>
+          <button key={key} onClick={() => setSortKey(key)} style={{ padding: "4px 10px", borderRadius: 14, fontSize: 12, fontFamily: "Inter, sans-serif", border: `1px solid ${sortKey === key ? C.amber : C.line}`, background: sortKey === key ? C.amber : "transparent", color: sortKey === key ? C.ink : C.chalkDim, cursor: "pointer" }}>{label}</button>
         ))}
       </div>
 
@@ -2362,7 +2369,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome, goPlayer })
         {loading && <p style={{ color: C.chalkDim }}>Loading games…</p>}
         {!loading && rows.length === 0 && <p style={{ color: C.chalkDim, margin: 0 }}>No finished games in this range.</p>}
         {!loading && rows.length > 0 && (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 12.5, minWidth: 560 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Inter, sans-serif", fontSize: 12.5, minWidth: 560 }}>
             <thead>
               <tr style={{ color: C.amber, textAlign: "left" }}>
                 {["Player", "PA", "AB", "R", "H", "2B", "3B", "HR", "XBH", "RBI", "BB", "K", "AVG", "OBP", "SLG", "OPS", "ISO", "BB%", "K%"].map((h) => (
@@ -2403,7 +2410,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome, goPlayer })
         <>
           <Eyebrow>Season Pitching</Eyebrow>
           <Card style={{ overflowX: "auto", marginBottom: 16 }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 12.5, minWidth: 480 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Inter, sans-serif", fontSize: 12.5, minWidth: 480 }}>
               <thead>
                 <tr style={{ color: C.amber, textAlign: "left" }}>
                   {["Player", "IP", "ER", "ERA", "Pitches", "Strike%"].map((h) => <th key={h} style={{ padding: "4px 6px", borderBottom: `1px solid ${C.line}55` }}>{h}</th>)}
@@ -2438,7 +2445,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome, goPlayer })
             <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
               {Object.entries(fieldingTotals).map(([pid, f]) => {
                 const p = rosterPlayers.find((x) => x.id === pid);
-                return <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "IBM Plex Mono, monospace" }}>{p ? p.name : "?"} — {f.PO} PO, {f.A} A, {f.E} E</div>;
+                return <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "Inter, sans-serif" }}>{p ? p.name : "?"} — {f.PO} PO, {f.A} A, {f.E} E</div>;
               })}
             </div>
           </Card>
@@ -2518,8 +2525,8 @@ function PlayerProfileView({ player, team, loadFinalGamesForTeam, goHome, goTeam
       <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "6px 0 16px" }}>
         {team && <TeamBadge team={team} size={40} />}
         <div>
-          <h1 style={{ fontFamily: "Oswald, sans-serif", color: C.chalk, fontSize: 28, margin: 0 }}>{player.name}</h1>
-          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 12, color: C.chalkDim }}>#{player.number || "—"} · {team ? team.name : ""}</div>
+          <h1 style={{ fontFamily: "Inter, sans-serif", color: C.chalk, fontSize: 28, margin: 0 }}>{player.name}</h1>
+          <div style={{ fontFamily: "Inter, sans-serif", fontSize: 12, color: C.chalkDim }}>#{player.number || "—"} · {team ? team.name : ""}</div>
         </div>
       </div>
 
@@ -2532,8 +2539,8 @@ function PlayerProfileView({ player, team, loadFinalGamesForTeam, goHome, goTeam
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(70px, 1fr))", gap: 12 }}>
               {statBlock.map(([label, value]) => (
                 <div key={label} style={{ textAlign: "center" }}>
-                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>{label}</div>
-                  <div style={{ fontFamily: "Oswald, sans-serif", fontSize: 18, color: C.chalk, fontWeight: 700 }}>{value}</div>
+                  <div style={{ fontFamily: "Inter, sans-serif", fontSize: 10, color: C.chalkDim, letterSpacing: 1 }}>{label}</div>
+                  <div style={{ fontFamily: "Inter, sans-serif", fontSize: 18, color: C.chalk, fontWeight: 700 }}>{value}</div>
                 </div>
               ))}
             </div>
@@ -2554,7 +2561,7 @@ function PlayerProfileView({ player, team, loadFinalGamesForTeam, goHome, goTeam
           <Card style={{ overflowX: "auto" }}>
             {gameLog.length === 0 && <p style={{ color: C.chalkDim, margin: 0 }}>No games with an at-bat yet.</p>}
             {gameLog.length > 0 && (
-              <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "IBM Plex Mono, monospace", fontSize: 12.5, minWidth: 520 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Inter, sans-serif", fontSize: 12.5, minWidth: 520 }}>
                 <thead>
                   <tr style={{ color: C.amber, textAlign: "left" }}>
                     {["Date", "Opponent", "AB", "R", "H", "RBI", "BB", "K", "AVG"].map((h) => <th key={h} style={{ padding: "4px 6px", borderBottom: `1px solid ${C.line}55` }}>{h}</th>)}
