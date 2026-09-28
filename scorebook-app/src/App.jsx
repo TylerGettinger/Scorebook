@@ -74,7 +74,8 @@ function emptyPitchingState() {
     ourStrikes: 0,
     ourOutsAtStintStart: 0,
     ourEarnedRuns: 0,
-    ourHistory: [], // [{ playerId, balls, strikes, outsRecorded, earnedRuns }]
+    ourK: 0, // strikeouts recorded by our current pitcher
+    ourHistory: [], // [{ playerId, balls, strikes, outsRecorded, earnedRuns, strikeouts }]
     theirName: "",
     theirBalls: 0,
     theirStrikes: 0,
@@ -277,7 +278,7 @@ function GameHighBoard({ title, entries, format }) {
 // Minimal SVG line chart — no charting library needed. points: [{ label, value }]
 // in chronological order. Renders a smooth-ish polyline with a value axis label
 // at the top and the first/last x-axis labels at the bottom.
-function TrendChart({ points, format, onPointClick, selectedIndex }) {
+function TrendChart({ points, format, onPointClick, selectedIndex, svgRef }) {
   const fmt = format || ((v) => v);
   if (!points || points.length === 0) {
     return <p style={{ color: C.chalkDim, fontSize: 13, margin: 0 }}>Not enough games yet to chart a trend.</p>;
@@ -295,7 +296,7 @@ function TrendChart({ points, format, onPointClick, selectedIndex }) {
   }));
   const pathD = coords.map((c, i) => `${i === 0 ? "M" : "L"} ${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: 180 }} preserveAspectRatio="none">
+    <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: 180 }} preserveAspectRatio="none">
       <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} stroke={C.line} strokeWidth="1" opacity="0.4" />
       {coords.length > 1 && <path d={pathD} fill="none" stroke={C.amber} strokeWidth="2.5" />}
       {coords.map((c, i) => {
@@ -364,11 +365,12 @@ function pitchingLine(stints) {
   const strikes = stints.reduce((a, s) => a + (s.strikes || 0), 0);
   const outs = stints.reduce((a, s) => a + (s.outsRecorded || 0), 0);
   const er = stints.reduce((a, s) => a + (s.earnedRuns || 0), 0);
+  const k = stints.reduce((a, s) => a + (s.strikeouts || 0), 0);
   const pitches = balls + strikes;
   const strikePct = pitches > 0 ? (strikes / pitches) * 100 : 0;
   const ip = outs / 3;
   const era = ip > 0 ? (er * ERA_INNINGS) / ip : 0;
-  return { balls, strikes, outs, er, pitches, strikePct, ip, era };
+  return { balls, strikes, outs, er, k, pitches, strikePct, ip, era };
 }
 
 /* ---------------- small UI atoms ---------------- */
@@ -898,10 +900,10 @@ function Scorebook() {
     const p = g.pitching;
     if (!p.ourPitcherId) return p;
     const outsRecorded = g.totalPitchingOuts - p.ourOutsAtStintStart;
-    if (outsRecorded === 0 && p.ourBalls === 0 && p.ourStrikes === 0 && p.ourEarnedRuns === 0) return p; // nothing to archive
+    if (outsRecorded === 0 && p.ourBalls === 0 && p.ourStrikes === 0 && p.ourEarnedRuns === 0 && p.ourK === 0) return p; // nothing to archive
     return {
       ...p,
-      ourHistory: [...p.ourHistory, { playerId: p.ourPitcherId, balls: p.ourBalls, strikes: p.ourStrikes, outsRecorded, earnedRuns: p.ourEarnedRuns }],
+      ourHistory: [...p.ourHistory, { playerId: p.ourPitcherId, balls: p.ourBalls, strikes: p.ourStrikes, outsRecorded, earnedRuns: p.ourEarnedRuns, strikeouts: p.ourK }],
     };
   };
   const setOurPitcher = (playerId) => {
@@ -909,7 +911,7 @@ function Scorebook() {
     const archived = archiveCurrentStint(activeGame);
     persistGame({
       ...activeGame,
-      pitching: { ...archived, ourPitcherId: playerId, ourBalls: 0, ourStrikes: 0, ourEarnedRuns: 0, ourOutsAtStintStart: activeGame.totalPitchingOuts },
+      pitching: { ...archived, ourPitcherId: playerId, ourBalls: 0, ourStrikes: 0, ourEarnedRuns: 0, ourK: 0, ourOutsAtStintStart: activeGame.totalPitchingOuts },
     });
   };
   const setTheirPitcherName = (name) => {
@@ -942,7 +944,7 @@ function Scorebook() {
       }
       if (type === "strike" && nextStrikes >= 3) {
         if (side === "their") { recordOutcome("K", newPitching); return; }
-        defenseOut(newPitching);
+        defenseOut({ ...newPitching, ourK: activeGame.pitching.ourK + 1 });
         return;
       }
       persistGame({ ...activeGame, pitching: newPitching, count: { balls: nextBalls, strikes: nextStrikes } });
@@ -960,12 +962,17 @@ function Scorebook() {
   const endGame = () => {
     if (!activeGame) return;
     const archived = archiveCurrentStint(activeGame);
-    persistGame({ ...activeGame, status: "final", pitching: archived });
+    // The final stint now lives in ourHistory, so clear the "current" fields —
+    // otherwise the summary counts that stint a second time (doubled innings).
+    const finalPitching = { ...archived, ourPitcherId: null, ourBalls: 0, ourStrikes: 0, ourEarnedRuns: 0, ourK: 0 };
+    persistGame({ ...activeGame, status: "final", pitching: finalPitching });
     setView("summary");
   };
   const reopenGame = () => {
     if (!activeGame) return;
-    persistGame({ ...activeGame, status: "live" });
+    // Any stint is already in ourHistory; clear "current" fields so a game that
+    // was finalized before the fix doesn't double count when it goes live again.
+    persistGame({ ...activeGame, status: "live", pitching: { ...activeGame.pitching, ourPitcherId: null, ourBalls: 0, ourStrikes: 0, ourEarnedRuns: 0, ourK: 0 } });
     setHistory([]);
     setView("live");
   };
@@ -1698,16 +1705,177 @@ function PitchCounter({ title, pitcherControl, balls, strikes, onBall, onStrike,
 }
 
 /* ---------------- LIVE / FINAL BOX SCORE (shared) ---------------- */
-function BoxScoreTable({ game, players }) {
-  // Anyone who ever batted (via plays, or has a manual stat line) should stay
-  // on the box score even if a substitution later moved them out of their
-  // lineup slot — otherwise their stats would silently vanish from the table.
+/* ---------------- DOWNLOAD HELPERS ---------------- */
+function triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+const safeName = (str) => String(str || "").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase();
+
+// Everyone who ever batted (via plays, or a manual stat line) stays on the box
+// score even if a substitution later moved them out of their lineup slot.
+function boxScoreRows(game, players) {
   const seen = new Set();
   const order = [];
   (game.lineup || []).forEach((id) => { if (!seen.has(id)) { seen.add(id); order.push(id); } });
   (game.plays || []).forEach((p) => { if (!seen.has(p.playerId)) { seen.add(p.playerId); order.push(p.playerId); } });
   Object.keys(game.manualStats || {}).forEach((id) => { if (!seen.has(id)) { seen.add(id); order.push(id); } });
-  const rows = order.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: statsForPlayerInGame(game, p.id) }));
+  return order.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: statsForPlayerInGame(game, p.id) }));
+}
+// Pitching stints for a game. An in-progress stint is only included while the
+// game is live — once final, every stint is already in ourHistory.
+function gamePitchingStints(game) {
+  const p = game.pitching;
+  const stints = [...p.ourHistory];
+  if (game.status !== "final" && p.ourPitcherId) {
+    stints.push({ playerId: p.ourPitcherId, balls: p.ourBalls, strikes: p.ourStrikes, outsRecorded: game.totalPitchingOuts - p.ourOutsAtStintStart, earnedRuns: p.ourEarnedRuns, strikeouts: p.ourK });
+  }
+  return stints;
+}
+
+function downloadBoxScoreCsv(game, team, players) {
+  const esc = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
+  const lines = [];
+  lines.push([`${team ? team.name : "Us"} vs ${game.opponent}`].map(esc).join(","));
+  lines.push([game.date].map(esc).join(","));
+  lines.push([game.status === "final" ? `Final: ${game.ourScore}-${game.theirScore}` : `Score: ${game.ourScore}-${game.theirScore}`].map(esc).join(","));
+  lines.push("");
+  lines.push(["Player", "#", "PA", "AB", "R", "H", "2B", "3B", "HR", "RBI", "BB", "HBP", "K", "SF", "AVG", "OBP", "SLG", "OPS"].map(esc).join(","));
+  boxScoreRows(game, players).forEach(({ p, s }) => {
+    lines.push([p.name, p.number || "", s.PA, s.AB, s.R, s.H, s["2B"], s["3B"], s.HR, s.RBI, s.BB, s.HBP, s.K, s.SF, fmt3(s.AVG), fmt3(s.OBP), fmt3(s.SLG), fmt3(s.OPS)].map(esc).join(","));
+  });
+  const byPlayer = {};
+  gamePitchingStints(game).forEach((st) => { (byPlayer[st.playerId] = byPlayer[st.playerId] || []).push(st); });
+  const pitchers = Object.keys(byPlayer);
+  if (pitchers.length > 0) {
+    lines.push("");
+    lines.push(["Pitcher", "IP", "K", "ER", "ERA", "Pitches", "Strike %"].map(esc).join(","));
+    pitchers.forEach((pid) => {
+      const pl = players.find((x) => x.id === pid);
+      const line = pitchingLine(byPlayer[pid]);
+      lines.push([pl ? pl.name : "?", ipDisplay(line.outs), line.k, line.er, line.era.toFixed(2), line.pitches, `${line.strikePct.toFixed(0)}%`].map(esc).join(","));
+    });
+  }
+  const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+  triggerDownload(blob, `${safeName(team ? team.name : "team")}-vs-${safeName(game.opponent)}-${game.date}-boxscore.csv`);
+}
+
+// Draws the box score onto a canvas and downloads it as a PNG image — a clean,
+// shareable picture rather than a spreadsheet.
+function downloadBoxScoreImage(game, team, players) {
+  const rows = boxScoreRows(game, players);
+  const cols = ["AB", "R", "H", "RBI", "BB", "K", "AVG"];
+  const PAD = 28, NAME_W = 240, COL_W = 66, ROW_H = 36, HEAD_H = 132;
+  const W = PAD * 2 + NAME_W + cols.length * COL_W;
+  const H = HEAD_H + (rows.length + 2) * ROW_H + 52;
+  const scale = 2;
+  const canvas = document.createElement("canvas");
+  canvas.width = W * scale;
+  canvas.height = H * scale;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(scale, scale);
+  const F = "Inter, -apple-system, Segoe UI, sans-serif";
+
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = C.navy; ctx.fillRect(0, 0, W, HEAD_H);
+
+  const ourName = team ? team.name : "Us";
+  const isFinal = game.status === "final";
+  ctx.fillStyle = C.chalk; ctx.font = `800 26px ${F}`; ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  ctx.fillText(`${ourName} vs ${game.opponent}`, PAD, 42);
+  ctx.fillStyle = C.chalkDim; ctx.font = `500 14px ${F}`;
+  ctx.fillText(game.date, PAD, 64);
+  ctx.fillStyle = isFinal ? C.red : (team && team.color) || C.green;
+  const badge = isFinal ? "FINAL" : `${game.half === "top" ? "TOP" : "BOT"} ${game.inning}`;
+  ctx.font = `800 14px ${F}`;
+  const bw = ctx.measureText(badge).width + 22;
+  ctx.beginPath(); ctx.roundRect(PAD, 80, bw, 28, 8); ctx.fill();
+  ctx.fillStyle = isFinal ? C.chalk : C.ink; ctx.fillText(badge, PAD + 11, 99);
+  ctx.fillStyle = C.chalk; ctx.font = `800 44px ${F}`; ctx.textAlign = "right";
+  ctx.fillText(`${game.ourScore} – ${game.theirScore}`, W - PAD, 96);
+  ctx.textAlign = "left";
+
+  const colX = (i) => PAD + NAME_W + i * COL_W + COL_W; // right edge of each stat column
+  let y = HEAD_H + 26;
+  ctx.fillStyle = C.amber; ctx.font = `700 13px ${F}`;
+  ctx.fillText("PLAYER", PAD, y);
+  ctx.textAlign = "right";
+  cols.forEach((c, i) => ctx.fillText(c, colX(i), y));
+  ctx.textAlign = "left";
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PAD, y + 10); ctx.lineTo(W - PAD, y + 10); ctx.stroke();
+
+  const fit = (text, maxW) => { let t = text; while (t.length > 1 && ctx.measureText(t).width > maxW) t = t.slice(0, -1); return t === text ? t : t.trimEnd() + "…"; };
+  const totals = { AB: 0, R: 0, H: 0, RBI: 0, BB: 0, K: 0 };
+  ctx.font = `500 15px ${F}`;
+  rows.forEach(({ p, s }, idx) => {
+    y += ROW_H;
+    if (idx % 2 === 0) { ctx.fillStyle = "rgba(255,255,255,0.04)"; ctx.fillRect(PAD - 8, y - 23, W - PAD * 2 + 16, ROW_H); }
+    ctx.fillStyle = C.chalk; ctx.textAlign = "left"; ctx.font = `600 15px ${F}`;
+    ctx.fillText(fit(p.number ? `${p.name}  #${p.number}` : p.name, NAME_W - 10), PAD, y);
+    ctx.font = `500 15px ${F}`; ctx.textAlign = "right";
+    const vals = [s.AB, s.R, s.H, s.RBI, s.BB, s.K, fmt3(s.AVG)];
+    vals.forEach((v, i) => ctx.fillText(String(v), colX(i), y));
+    Object.keys(totals).forEach((k) => { totals[k] += s[k] || 0; });
+  });
+  y += ROW_H;
+  ctx.strokeStyle = C.line; ctx.beginPath(); ctx.moveTo(PAD, y - 22); ctx.lineTo(W - PAD, y - 22); ctx.stroke();
+  ctx.fillStyle = C.amber; ctx.font = `800 15px ${F}`; ctx.textAlign = "left"; ctx.fillText("TEAM", PAD, y);
+  ctx.textAlign = "right";
+  [totals.AB, totals.R, totals.H, totals.RBI, totals.BB, totals.K, fmt3(totals.AB > 0 ? totals.H / totals.AB : 0)].forEach((v, i) => ctx.fillText(String(v), colX(i), y));
+
+  ctx.fillStyle = C.chalkDim; ctx.font = `600 12px ${F}`; ctx.textAlign = "left";
+  ctx.fillText("Scorebook", PAD, H - 18);
+
+  canvas.toBlob((b) => triggerDownload(b, `${safeName(ourName)}-vs-${safeName(game.opponent)}-${game.date}-boxscore.png`), "image/png");
+}
+
+// Exports a chart <svg> as a PNG with a title header on an opaque background.
+function downloadChartPng(svgEl, { title, subtitle, filename }) {
+  const vb = svgEl.viewBox.baseVal;
+  const w = vb.width, h = vb.height;
+  const clone = svgEl.cloneNode(true);
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("width", w);
+  clone.setAttribute("height", h);
+  clone.removeAttribute("style");
+  const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(clone)], { type: "image/svg+xml;charset=utf-8" }));
+  const img = new Image();
+  img.onload = () => {
+    const scale = 2, pad = 20, headH = 64;
+    const cw = w + pad * 2, ch = h + headH + pad;
+    const canvas = document.createElement("canvas");
+    canvas.width = cw * scale; canvas.height = ch * scale;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(scale, scale);
+    ctx.fillStyle = C.bg; ctx.fillRect(0, 0, cw, ch);
+    ctx.fillStyle = C.chalk; ctx.font = "800 20px Inter, sans-serif"; ctx.fillText(title, pad, 32);
+    ctx.fillStyle = C.chalkDim; ctx.font = "500 13px Inter, sans-serif"; ctx.fillText(subtitle, pad, 52);
+    ctx.drawImage(img, pad, headH, w, h);
+    URL.revokeObjectURL(url);
+    canvas.toBlob((b) => triggerDownload(b, filename), "image/png");
+  };
+  img.onerror = () => { URL.revokeObjectURL(url); alert("Couldn't export the chart image."); };
+  img.src = url;
+}
+
+function BoxScoreDownloads({ game, team, players }) {
+  return (
+    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+      <Btn size="sm" tone="ghost" onClick={() => downloadBoxScoreImage(game, team, players)}>Download Image</Btn>
+      <Btn size="sm" tone="ghost" onClick={() => downloadBoxScoreCsv(game, team, players)}>Download CSV</Btn>
+    </div>
+  );
+}
+
+function BoxScoreTable({ game, players }) {
+  const rows = boxScoreRows(game, players);
   return (
     <div style={{ overflowX: "auto" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Inter, sans-serif", fontSize: 13 }}>
@@ -1724,9 +1892,7 @@ function BoxScoreTable({ game, players }) {
   );
 }
 function PitchingLineDisplay({ game, players }) {
-  const p = game.pitching;
-  const stints = [...p.ourHistory];
-  if (p.ourPitcherId) stints.push({ playerId: p.ourPitcherId, balls: p.ourBalls, strikes: p.ourStrikes, outsRecorded: game.totalPitchingOuts - p.ourOutsAtStintStart, earnedRuns: p.ourEarnedRuns });
+  const stints = gamePitchingStints(game);
   const byPlayer = {};
   stints.forEach((s) => {
     byPlayer[s.playerId] = byPlayer[s.playerId] || [];
@@ -1742,7 +1908,7 @@ function PitchingLineDisplay({ game, players }) {
         const line = pitchingLine(byPlayer[pid]);
         return (
           <div key={pid} style={{ color: C.chalk, fontSize: 13, fontFamily: "Inter, sans-serif" }}>
-            {player ? player.name : "?"} — {ipDisplay(line.outs)} IP, {line.er} ER, ERA {line.era.toFixed(2)}, {line.strikePct.toFixed(0)}% strikes ({line.strikes}/{line.pitches})
+            {player ? player.name : "?"} — {ipDisplay(line.outs)} IP, {line.k} K, {line.er} ER, ERA {line.era.toFixed(2)}, {line.strikePct.toFixed(0)}% strikes ({line.strikes}/{line.pitches})
           </div>
         );
       })}
@@ -1909,7 +2075,8 @@ function LiveGameView(props) {
               <Card style={{ marginBottom: 16 }}>
                 <Eyebrow>On defense — {game.opponent} batting</Eyebrow>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  <Btn onClick={() => defenseOut()} style={{ background: C.navy }}>Record Out</Btn>
+                  <Btn onClick={() => defenseOut({ ...game.pitching, ourK: game.pitching.ourK + 1 })} style={{ background: C.navy }}>Strikeout (K)</Btn>
+                  <Btn onClick={() => defenseOut()} style={{ background: C.navy }}>Other Out</Btn>
                   <Btn tone="amber" onClick={() => theirRun(1, true)}>+1 Run (Earned)</Btn>
                   <Btn tone="dirt" onClick={() => theirRun(1, false)}>+1 Run (Unearned)</Btn>
                   <Btn tone="ghost" size="sm" onClick={() => theirRun(-1, false)}>-1 Run</Btn>
@@ -1965,7 +2132,7 @@ function LiveGameView(props) {
                       <option value="">Select pitcher…</option>
                       {defensivePlayers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                     </select>
-                    {ourPitcher && <span style={{ fontSize: 12, color: C.chalkDim, fontFamily: "Inter, sans-serif" }}>Now pitching: {ourPitcher.name}</span>}
+                    {ourPitcher && <span style={{ fontSize: 12, color: C.chalkDim, fontFamily: "Inter, sans-serif" }}>Now pitching: {ourPitcher.name} · {game.pitching.ourK} K</span>}
                   </div>
                 }
                 balls={game.pitching.ourBalls}
@@ -2008,7 +2175,10 @@ function LiveGameView(props) {
             <SubstitutionsPanel game={game} team={team} players={players} substitutePlayer={substitutePlayer} />
           )}
 
-          <Eyebrow>Live box score — {team ? team.name : "Us"}</Eyebrow>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 6 }}>
+            <Eyebrow>Live box score — {team ? team.name : "Us"}</Eyebrow>
+            <BoxScoreDownloads game={game} team={team} players={players} />
+          </div>
           <Card style={{ marginBottom: 16 }}>
             <BoxScoreTable game={game} players={players} />
             <PitchingLineDisplay game={game} players={players} />
@@ -2143,7 +2313,10 @@ function SummaryView({ game, team, players, scorekeeper, generating, generateRec
         </Card>
       )}
 
-      <Eyebrow>Final Box Score</Eyebrow>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: 6 }}>
+        <Eyebrow>Final Box Score</Eyebrow>
+        <BoxScoreDownloads game={game} team={team} players={players} />
+      </div>
       <Card style={{ marginBottom: 16 }}>
         <BoxScoreTable game={game} players={players} />
       </Card>
@@ -2422,7 +2595,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome, goPlayer })
             <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Inter, sans-serif", fontSize: 12.5, minWidth: 480 }}>
               <thead>
                 <tr style={{ color: C.amber, textAlign: "left" }}>
-                  {["Player", "IP", "ER", "ERA", "Pitches", "Strike%"].map((h) => <th key={h} style={{ padding: "4px 6px", borderBottom: `1px solid ${C.line}55` }}>{h}</th>)}
+                  {["Player", "IP", "K", "ER", "ERA", "Pitches", "Strike%"].map((h) => <th key={h} style={{ padding: "4px 6px", borderBottom: `1px solid ${C.line}55` }}>{h}</th>)}
                 </tr>
               </thead>
               <tbody>
@@ -2433,6 +2606,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome, goPlayer })
                     <tr key={pid} style={{ color: C.chalk }}>
                       <td style={{ padding: "4px 6px" }}>{p ? p.name : "?"}</td>
                       <td style={{ padding: "4px 6px" }}>{ipDisplay(line.outs)}</td>
+                      <td style={{ padding: "4px 6px" }}>{line.k}</td>
                       <td style={{ padding: "4px 6px" }}>{line.er}</td>
                       <td style={{ padding: "4px 6px" }}>{line.era.toFixed(2)}</td>
                       <td style={{ padding: "4px 6px" }}>{line.pitches}</td>
@@ -2505,6 +2679,7 @@ function PlayerProfileView({ player, team, loadFinalGamesForTeam, goHome, goTeam
   const [loading, setLoading] = useState(false);
   const [trendKey, setTrendKey] = useState("AVG");
   const [selectedIndex, setSelectedIndex] = useState(null);
+  const chartSvgRef = useRef(null);
 
   useEffect(() => {
     if (!team) return;
@@ -2572,16 +2747,29 @@ function PlayerProfileView({ player, team, loadFinalGamesForTeam, goHome, goTeam
 
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, flexWrap: "wrap", gap: 8 }}>
             <Eyebrow>Trend over the season</Eyebrow>
-            <select
-              value={trendKey}
-              onChange={(e) => { setTrendKey(e.target.value); setSelectedIndex(null); }}
-              style={{ ...selStyle, width: "auto", padding: "6px 10px", fontSize: 13 }}
-            >
-              {TREND_STAT_OPTIONS.map(([label, key]) => <option key={key} value={key}>{label}</option>)}
-            </select>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <select
+                value={trendKey}
+                onChange={(e) => { setTrendKey(e.target.value); setSelectedIndex(null); }}
+                style={{ ...selStyle, width: "auto", padding: "6px 10px", fontSize: 13 }}
+              >
+                {TREND_STAT_OPTIONS.map(([label, key]) => <option key={key} value={key}>{label}</option>)}
+              </select>
+              <Btn
+                size="sm"
+                tone="ghost"
+                onClick={() => chartSvgRef.current && downloadChartPng(chartSvgRef.current, {
+                  title: `${player.name} — ${trendOption[0]}`,
+                  subtitle: team ? team.name : "",
+                  filename: `${safeName(player.name)}-${safeName(trendOption[0])}-trend.png`,
+                })}
+              >
+                Download Chart
+              </Btn>
+            </div>
           </div>
           <Card style={{ marginBottom: selected ? 0 : 16 }}>
-            <TrendChart points={trendPoints} format={fmtTrend} onPointClick={setSelectedIndex} selectedIndex={selectedIndex} />
+            <TrendChart points={trendPoints} format={fmtTrend} onPointClick={setSelectedIndex} selectedIndex={selectedIndex} svgRef={chartSvgRef} />
             <p style={{ color: C.chalkDim, fontSize: 11, margin: "8px 0 0" }}>Tap a point to see that game and your stats through that point in the season.</p>
           </Card>
 
