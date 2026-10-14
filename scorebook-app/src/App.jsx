@@ -83,6 +83,7 @@ function emptyPitchingState() {
 }
 function emptyGameState() {
   return {
+    gameType: "regular", // 'regular' | 'playoff'
     source: "live", // 'live' (tracked play-by-play in this app) or 'manual' (old game, entered as a final box score)
     manualStats: {}, // playerId -> { AB, R, H, 2B, 3B, HR, RBI, BB, HBP, K, SF } — used only when source === 'manual'
     lineup: [],
@@ -216,10 +217,22 @@ function gameHighEntries(games, players, statKey) {
   return entries;
 }
 
+const isPlayoff = (g) => g && g.gameType === "playoff";
+function GameTypeToggle({ value, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: 8 }}>
+      <Btn tone={value !== "playoff" ? "amber" : "ghost"} onClick={() => onChange("regular")}>Regular Season</Btn>
+      <Btn tone={value === "playoff" ? "amber" : "ghost"} onClick={() => onChange("playoff")}>🏆 Playoff</Btn>
+    </div>
+  );
+}
+function PlayoffTag() {
+  return <span style={{ fontSize: 10, color: C.ink, background: C.amber, fontFamily: "Inter, sans-serif", marginLeft: 8, borderRadius: 8, padding: "1px 6px", fontWeight: 700 }}>PLAYOFF</span>;
+}
 const fmt3 = (n) => (n === 0 ? ".000" : n.toFixed(3).replace(/^0/, ""));
 const firstName = (full) => (full || "").trim().split(/\s+/)[0] || "";
-function teamRecord(teamId, gameIndex) {
-  const finals = gameIndex.filter((g) => g.teamId === teamId && g.status === "final");
+function teamRecord(teamId, gameIndex, type) {
+  const finals = gameIndex.filter((g) => g.teamId === teamId && g.status === "final" && (!type || (type === "playoff") === isPlayoff(g)));
   const w = finals.filter((g) => g.ourScore > g.theirScore).length;
   const l = finals.filter((g) => g.ourScore < g.theirScore).length;
   const t = finals.filter((g) => g.ourScore === g.theirScore).length;
@@ -576,10 +589,10 @@ function Scorebook() {
   const refreshGameIndex = useCallback(async () => {
     const { data } = await supabase
       .from("games")
-      .select("id, team_id, opponent, date, status, our_score, their_score, source:state->>source")
+      .select("id, team_id, opponent, date, status, our_score, their_score, source:state->>source, gameType:state->>gameType")
       .order("created_at", { ascending: false });
     setGameIndex(
-      (data || []).map((r) => ({ id: r.id, teamId: r.team_id, opponent: r.opponent, date: r.date, status: r.status, ourScore: r.our_score, theirScore: r.their_score, source: r.source || "live" }))
+      (data || []).map((r) => ({ id: r.id, teamId: r.team_id, opponent: r.opponent, date: r.date, status: r.status, ourScore: r.our_score, theirScore: r.their_score, source: r.source || "live", gameType: r.gameType || "regular" }))
     );
   }, []);
 
@@ -671,8 +684,8 @@ function Scorebook() {
   };
 
   /* ---------- game lifecycle ---------- */
-  const startGame = async ({ teamId, opponent, date, isHome, lineup }) => {
-    const g = { id: undefined, teamId, opponent, date, isHome, status: "live", ourScore: 0, theirScore: 0, ...emptyGameState(), lineup };
+  const startGame = async ({ teamId, opponent, date, isHome, lineup, gameType }) => {
+    const g = { id: undefined, teamId, opponent, date, isHome, status: "live", ourScore: 0, theirScore: 0, ...emptyGameState(), lineup, gameType: gameType || "regular" };
     const row = gameToRow(g);
     delete row.id;
     const { data, error } = await supabase.from("games").insert(row).select().single();
@@ -680,7 +693,7 @@ function Scorebook() {
     const full = rowToGame(data);
     setActiveGame(full);
     setHistory([]);
-    setGameIndex((idx) => [{ id: full.id, teamId, opponent, date, status: "live", ourScore: 0, theirScore: 0, source: "live" }, ...idx]);
+    setGameIndex((idx) => [{ id: full.id, teamId, opponent, date, status: "live", ourScore: 0, theirScore: 0, source: "live", gameType: gameType || "regular" }, ...idx]);
     setView("live");
   };
 
@@ -1314,7 +1327,8 @@ function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, 
         <h1 style={{ fontFamily: "Inter, sans-serif", color: C.chalk, fontSize: 30, margin: 0 }}>{team.name}</h1>
         {teamRecord(team.id, games).played > 0 && (
           <span style={{ background: `${C.amber}22`, border: `1px solid ${C.amber}55`, borderRadius: 20, padding: "4px 12px" }}>
-            <RecordBadge record={teamRecord(team.id, games)} size={14} />
+            <RecordBadge record={teamRecord(team.id, games, "regular")} size={14} />
+            {teamRecord(team.id, games, "playoff").played > 0 && <span style={{ marginLeft: 8, fontFamily: "Inter, sans-serif", fontSize: 12, color: C.amber }}>🏆 <RecordBadge record={teamRecord(team.id, games, "playoff")} size={12} /></span>}
           </span>
         )}
       </div>
@@ -1392,6 +1406,7 @@ function TeamView({ team, players, games, scorekeeper, addPlayer, removePlayer, 
               <div style={{ color: C.chalk, fontFamily: "Inter, sans-serif", fontWeight: 500 }}>
                 vs {g.opponent}
                 {g.source === "manual" && <span style={{ fontSize: 10, color: C.chalkDim, fontFamily: "Inter, sans-serif", marginLeft: 8, border: `1px solid ${C.line}`, borderRadius: 8, padding: "1px 6px" }}>MANUAL</span>}
+                {isPlayoff(g) && <PlayoffTag />}
               </div>
               <div style={{ color: C.chalkDim, fontSize: 12, fontFamily: "Inter, sans-serif" }}>{g.date}</div>
             </div>
@@ -1424,6 +1439,7 @@ function NewGameView({ teams, players, defaultTeamId, onCancel, onStart }) {
   const [opponent, setOpponent] = useState("");
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [isHome, setIsHome] = useState(true);
+  const [gameType, setGameType] = useState("regular");
   const [lineup, setLineup] = useState([]);
   const teamPlayers = players.filter((p) => p.teamId === teamId);
   const toggleLineup = (id) => setLineup((l) => (l.includes(id) ? l.filter((x) => x !== id) : [...l, id]));
@@ -1440,6 +1456,7 @@ function NewGameView({ teams, players, defaultTeamId, onCancel, onStart }) {
         </Field>
         <Field label="Opponent"><input value={opponent} onChange={(e) => setOpponent(e.target.value)} placeholder="Opponent team name" style={selStyle} /></Field>
         <Field label="Date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={selStyle} /></Field>
+        <Field label="Game type"><GameTypeToggle value={gameType} onChange={setGameType} /></Field>
         <Field label="We are">
           <div style={{ display: "flex", gap: 8 }}>
             <Btn tone={isHome ? "amber" : "ghost"} onClick={() => setIsHome(true)}>Home</Btn>
@@ -1469,7 +1486,7 @@ function NewGameView({ teams, players, defaultTeamId, onCancel, onStart }) {
           );
         })}
       </Card>
-      <Btn tone="amber" size="lg" disabled={!teamId || !opponent.trim() || lineup.length === 0} onClick={() => onStart({ teamId, opponent: opponent.trim(), date, isHome, lineup })}>Start Game</Btn>
+      <Btn tone="amber" size="lg" disabled={!teamId || !opponent.trim() || lineup.length === 0} onClick={() => onStart({ teamId, opponent: opponent.trim(), date, isHome, lineup, gameType })}>Start Game</Btn>
     </div>
   );
 }
@@ -1485,6 +1502,7 @@ function OldGameView({ team, players, existingGame, onCancel, onSave }) {
   const [theirScore, setTheirScore] = useState(existingGame ? existingGame.theirScore : 0);
   const [selected, setSelected] = useState(existingGame ? existingGame.lineup : []);
   const [stats, setStats] = useState(existingGame ? existingGame.manualStats : {});
+  const [gameType, setGameType] = useState(existingGame && existingGame.gameType ? existingGame.gameType : "regular");
 
   if (!team) return <div style={{ color: C.chalk }}>Team not found. <a onClick={onCancel} style={{ color: C.amber, cursor: "pointer" }}>Go back</a></div>;
 
@@ -1502,7 +1520,7 @@ function OldGameView({ team, players, existingGame, onCancel, onSave }) {
       MANUAL_STAT_FIELDS.forEach((f) => { clean[f] = row[f] || 0; });
       cleanStats[pid] = clean;
     });
-    onSave({ opponent: opponent.trim(), date, ourScore: Number(ourScore) || 0, theirScore: Number(theirScore) || 0, lineup: selected, manualStats: cleanStats });
+    onSave({ opponent: opponent.trim(), date, ourScore: Number(ourScore) || 0, theirScore: Number(theirScore) || 0, lineup: selected, manualStats: cleanStats, gameType });
   };
 
   return (
@@ -1516,6 +1534,7 @@ function OldGameView({ team, players, existingGame, onCancel, onSave }) {
       <Card style={{ marginBottom: 16 }}>
         <Field label="Opponent"><input value={opponent} onChange={(e) => setOpponent(e.target.value)} placeholder="Opponent team name" style={selStyle} /></Field>
         <Field label="Date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={selStyle} /></Field>
+        <Field label="Game type"><GameTypeToggle value={gameType} onChange={setGameType} /></Field>
         <div style={{ display: "flex", gap: 10 }}>
           <Field label="Our score"><input type="number" value={ourScore} onChange={(e) => setOurScore(e.target.value)} style={selStyle} /></Field>
           <Field label="Their score"><input type="number" value={theirScore} onChange={(e) => setTheirScore(e.target.value)} style={selStyle} /></Field>
@@ -2243,6 +2262,7 @@ function ScoreHeader({ game, team }) {
         }}
       >
         {isFinal ? "FINAL" : `${game.half === "top" ? "▲ TOP" : "▼ BOT"} ${game.inning}`}
+        {isPlayoff(game) && <span style={{ marginLeft: 10, fontSize: 12, background: C.amber, color: C.ink, borderRadius: 8, padding: "2px 8px", fontWeight: 800 }}>🏆 PLAYOFF</span>}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {[{ name: ourName, score: game.ourScore, batting: usBatting, us: true }, { name: game.opponent, score: game.theirScore, batting: !usBatting, us: false }].map((row, i) => (
@@ -2271,6 +2291,7 @@ function SummaryView({ game, team, players, scorekeeper, generating, generateRec
   const [date, setDate] = useState(game.date);
   const [ourScore, setOurScore] = useState(game.ourScore);
   const [theirScore, setTheirScore] = useState(game.theirScore);
+  const [gameType, setGameType] = useState(game.gameType || "regular");
 
   const rows = game.lineup.map((pid) => players.find((p) => p.id === pid)).filter(Boolean).map((p) => ({ p, s: statsForPlayerInGame(game, p.id) }));
 
@@ -2295,12 +2316,13 @@ function SummaryView({ game, team, players, scorekeeper, generating, generateRec
             <>
               <Field label="Opponent"><input value={opponent} onChange={(e) => setOpponent(e.target.value)} style={selStyle} /></Field>
               <Field label="Date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={selStyle} /></Field>
+              <Field label="Game type"><GameTypeToggle value={gameType} onChange={setGameType} /></Field>
               <div style={{ display: "flex", gap: 10 }}>
                 <Field label="Our score"><input type="number" value={ourScore} onChange={(e) => setOurScore(Number(e.target.value))} style={selStyle} /></Field>
                 <Field label="Their score"><input type="number" value={theirScore} onChange={(e) => setTheirScore(Number(e.target.value))} style={selStyle} /></Field>
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <Btn tone="amber" size="sm" onClick={() => { updateGameMeta({ opponent, date, ourScore, theirScore }); setEditing(false); }}>Save Changes</Btn>
+                <Btn tone="amber" size="sm" onClick={() => { updateGameMeta({ opponent, date, ourScore, theirScore, gameType }); setEditing(false); }}>Save Changes</Btn>
                 {game.source === "manual" ? (
                   <Btn tone="ghost" size="sm" onClick={goEditOldGame}>Edit Stats</Btn>
                 ) : (
@@ -2388,6 +2410,7 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome, goPlayer })
   const [rangeMode, setRangeMode] = useState("season"); // 'season' | 'week' | 'month' | 'custom'
   const [customStart, setCustomStart] = useState(presetDateRange(7).start);
   const [customEnd, setCustomEnd] = useState(presetDateRange(0).end);
+  const [typeFilter, setTypeFilter] = useState("all"); // 'all' | 'regular' | 'playoff'
   const [spotlightId, setSpotlightId] = useState("");
   const [blurb, setBlurb] = useState("");
 
@@ -2398,7 +2421,9 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome, goPlayer })
   }, [teamId, loadFinalGamesForTeam]);
 
   const range = rangeMode === "week" ? presetDateRange(7) : rangeMode === "month" ? presetDateRange(30) : rangeMode === "custom" ? { start: customStart, end: customEnd } : null;
-  const filteredGames = range ? games.filter((g) => g.date >= range.start && g.date <= range.end) : games;
+  const rangedGames = range ? games.filter((g) => g.date >= range.start && g.date <= range.end) : games;
+  const filteredGames = typeFilter === "all" ? rangedGames : rangedGames.filter((g) => (typeFilter === "playoff") === isPlayoff(g));
+  const hasPlayoffs = games.some(isPlayoff);
 
   const rosterPlayers = players.filter((p) => p.teamId === teamId);
   const rows = rosterPlayers.map((p) => ({ p, s: aggregateSeasonStats(p.id, filteredGames) })).sort((a, b) => b.s[sortKey] - a.s[sortKey]);
@@ -2457,6 +2482,18 @@ function SeasonView({ teams, players, loadFinalGamesForTeam, goHome, goPlayer })
         <Btn tone={viewMode === "hot" ? "amber" : "ghost"} size="sm" onClick={() => setViewMode("hot")}>🔥 Who's Hot</Btn>
         <Btn tone={viewMode === "highs" ? "amber" : "ghost"} size="sm" onClick={() => setViewMode("highs")}>🏆 Season Highs</Btn>
       </div>
+
+      <Eyebrow>Game type</Eyebrow>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 6 }}>
+        {[["all", "All Games"], ["regular", "Regular Season"], ["playoff", "🏆 Playoffs"]].map(([mode, label]) => (
+          <button key={mode} onClick={() => setTypeFilter(mode)} style={{ padding: "5px 12px", borderRadius: 14, fontSize: 12, fontFamily: "Inter, sans-serif", border: `1px solid ${typeFilter === mode ? C.amber : C.line}`, background: typeFilter === mode ? C.amber : "transparent", color: typeFilter === mode ? C.ink : C.chalkDim, cursor: "pointer", fontWeight: 600 }}>{label}</button>
+        ))}
+      </div>
+      <p style={{ color: C.chalkDim, fontSize: 12, marginTop: 0, marginBottom: 14 }}>
+        {typeFilter === "all" ? "Regular season and playoffs combined." : typeFilter === "playoff" ? "Playoff games only." : "Regular season only."}
+        {typeFilter !== "all" && ` ${filteredGames.length} game${filteredGames.length !== 1 ? "s" : ""}.`}
+        {!hasPlayoffs && typeFilter === "all" && " (No playoff games logged yet.)"}
+      </p>
 
       <Eyebrow>Time range</Eyebrow>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
@@ -2675,8 +2712,9 @@ const TREND_STAT_OPTIONS = [
 const trendFormat = (kind) => (kind === "avg" ? fmt3 : kind === "pct" ? (v) => `${v.toFixed(1)}%` : (v) => Math.round(v));
 
 function PlayerProfileView({ player, team, loadFinalGamesForTeam, goHome, goTeam }) {
-  const [games, setGames] = useState([]);
+  const [allGames, setAllGames] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [typeFilter, setTypeFilter] = useState("all");
   const [trendKey, setTrendKey] = useState("AVG");
   const [selectedIndex, setSelectedIndex] = useState(null);
   const chartSvgRef = useRef(null);
@@ -2685,7 +2723,7 @@ function PlayerProfileView({ player, team, loadFinalGamesForTeam, goHome, goTeam
     if (!team) return;
     setLoading(true);
     loadFinalGamesForTeam(team.id).then((g) => {
-      setGames([...g].sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : 0)));
+      setAllGames([...g].sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : 0)));
       setLoading(false);
     });
   }, [team, loadFinalGamesForTeam]);
@@ -2694,6 +2732,7 @@ function PlayerProfileView({ player, team, loadFinalGamesForTeam, goHome, goTeam
     return <div style={{ color: C.chalk }}>Player not found. <a onClick={goHome} style={{ color: C.amber, cursor: "pointer" }}>Go home</a></div>;
   }
 
+  const games = typeFilter === "all" ? allGames : allGames.filter((g) => (typeFilter === "playoff") === isPlayoff(g));
   const career = aggregateSeasonStats(player.id, games);
   const gameLog = games.map((g) => ({ g, s: statsForPlayerInGame(g, player.id) })).filter(({ s }) => s.PA > 0);
 
@@ -2728,6 +2767,14 @@ function PlayerProfileView({ player, team, loadFinalGamesForTeam, goHome, goTeam
           <div style={{ fontFamily: "Inter, sans-serif", fontSize: 12, color: C.chalkDim }}>#{player.number || "—"} · {team ? team.name : ""}</div>
         </div>
       </div>
+
+      {allGames.some(isPlayoff) && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "0 0 14px" }}>
+          {[["all", "All Games"], ["regular", "Regular Season"], ["playoff", "🏆 Playoffs"]].map(([mode, label]) => (
+            <button key={mode} onClick={() => { setTypeFilter(mode); setSelectedIndex(null); }} style={{ padding: "5px 12px", borderRadius: 14, fontSize: 12, fontFamily: "Inter, sans-serif", border: `1px solid ${typeFilter === mode ? C.amber : C.line}`, background: typeFilter === mode ? C.amber : "transparent", color: typeFilter === mode ? C.ink : C.chalkDim, cursor: "pointer", fontWeight: 600 }}>{label}</button>
+          ))}
+        </div>
+      )}
 
       {loading && <p style={{ color: C.chalkDim }}>Loading games…</p>}
 
